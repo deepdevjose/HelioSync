@@ -4,7 +4,6 @@ import { Link } from 'react-router-dom';
 import AuthShell, { AuthInput } from '../components/auth/AuthShell';
 import { sendPasswordReset } from '../services/authClient';
 import { getAuthErrorMessage } from '../services/authMessages';
-import { isFirebaseMockConfig } from '../services/firebase';
 import { useLocale } from '../i18n/locale';
 
 export default function ForgotPassword() {
@@ -21,12 +20,8 @@ export default function ForgotPassword() {
     setSuccess('');
 
     try {
-      const result = await sendPasswordReset(email);
-      setSuccess(
-        result.simulated
-          ? t('forgotPassword.successMock')
-          : t('forgotPassword.success'),
-      );
+      await sendPasswordReset(email);
+      setSuccess(t('forgotPassword.success'));
     } catch (authError) {
       setError(getAuthErrorMessage(authError, locale, t('forgotPassword.fallback')));
     } finally {
@@ -65,7 +60,6 @@ export default function ForgotPassword() {
         <form className="space-y-4" onSubmit={handleSubmit}>
           <AuthInput
             label={t('forgotPassword.emailLabel')}
-            hint={isFirebaseMockConfig ? t('forgotPassword.demoHint') : null}
             type="email"
             autoComplete="email"
             placeholder={t('forgotPassword.emailPlaceholder')}

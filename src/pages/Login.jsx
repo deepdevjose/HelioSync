@@ -4,7 +4,6 @@ import { ArrowRight, LoaderCircle } from 'lucide-react';
 import AuthShell, { AuthInput, AuthLinkRow } from '../components/auth/AuthShell';
 import { signInWithEmail, signInWithGoogle } from '../services/authClient';
 import { getAuthErrorMessage } from '../services/authMessages';
-import { isFirebaseMockConfig } from '../services/firebase';
 import { useLocale } from '../i18n/locale';
 
 export default function Login() {
@@ -50,12 +49,6 @@ export default function Login() {
       footer={<AuthLinkRow prompt={t('login.footerPrompt')} label={t('login.footerLabel')} to="/register" />}
     >
       <div className="space-y-5">
-        {isFirebaseMockConfig ? (
-          <div className="rounded-2xl border border-amber-400/20 bg-amber-400/10 px-4 py-3 text-sm text-amber-100">
-            {t('login.demoBanner')}
-          </div>
-        ) : null}
-
         {error ? (
           <div className="rounded-2xl border border-rose-400/30 bg-rose-400/10 px-4 py-3 text-sm text-rose-100">
             {error}

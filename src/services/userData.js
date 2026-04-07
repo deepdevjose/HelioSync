@@ -35,6 +35,22 @@ function writeLocalDocument(key, value) {
   storage.setItem(key, JSON.stringify(value));
 }
 
+function stripUndefinedDeep(value) {
+  if (Array.isArray(value)) {
+    return value.map(stripUndefinedDeep);
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([, entry]) => entry !== undefined)
+        .map(([key, entry]) => [key, stripUndefinedDeep(entry)]),
+    );
+  }
+
+  return value;
+}
+
 function getProfileKey(uid) {
   return `${USER_PROFILE_KEY_PREFIX}${uid}`;
 }
@@ -154,12 +170,13 @@ export async function updateUserProfileData(uid, patch) {
   }
 
   const now = getNowIso();
+  const safePatch = stripUndefinedDeep(patch);
 
   if (isFirebaseMockConfig) {
     const existing = readLocalDocument(getProfileKey(uid)) || { uid, createdAt: now };
     const nextProfile = {
       ...existing,
-      ...patch,
+      ...safePatch,
       uid,
       updatedAt: now,
       createdAt: existing.createdAt || now,
@@ -173,7 +190,7 @@ export async function updateUserProfileData(uid, patch) {
   const existing = snapshot.exists() ? snapshot.data() : { uid, createdAt: now };
   const nextProfile = {
     ...existing,
-    ...patch,
+    ...safePatch,
     uid,
     updatedAt: now,
     createdAt: existing.createdAt || now,
@@ -203,12 +220,13 @@ export async function saveUserSetup(uid, setup) {
   }
 
   const now = getNowIso();
+  const safeSetup = stripUndefinedDeep(setup);
 
   if (isFirebaseMockConfig) {
     const existing = readLocalDocument(getSetupKey(uid));
     const nextSetup = {
       ...existing,
-      ...setup,
+      ...safeSetup,
       uid,
       setupCompleted: true,
       onboardingCompleted: true,
@@ -224,7 +242,7 @@ export async function saveUserSetup(uid, setup) {
   const existing = snapshot.exists() ? snapshot.data() : null;
   const nextSetup = {
     ...existing,
-    ...setup,
+    ...safeSetup,
     uid,
     setupCompleted: true,
     onboardingCompleted: true,

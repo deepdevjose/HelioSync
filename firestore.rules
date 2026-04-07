@@ -1,0 +1,139 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function validString(value) {
+      return value is string;
+    }
+
+    function validNullableString(value) {
+      return value == null || value is string;
+    }
+
+    function validNullableNumber(value) {
+      return value == null || value is int || value is float;
+    }
+
+    function validProfile(data, uid) {
+      return data.uid == uid
+        && data.keys().hasOnly([
+          'uid',
+          'displayName',
+          'email',
+          'provider',
+          'createdAt',
+          'updatedAt'
+        ])
+        && validString(data.displayName)
+        && validString(data.email)
+        && data.provider in ['password', 'google']
+        && validString(data.createdAt)
+        && validString(data.updatedAt);
+    }
+
+    function validLocation(location) {
+      return location is map
+        && location.keys().hasOnly([
+          'source',
+          'city',
+          'region',
+          'country',
+          'latitude',
+          'longitude',
+          'label'
+        ])
+        && validNullableString(location.source)
+        && validNullableString(location.city)
+        && validNullableString(location.region)
+        && validNullableString(location.country)
+        && validNullableNumber(location.latitude)
+        && validNullableNumber(location.longitude)
+        && validNullableString(location.label);
+    }
+
+    function validStaticOrientation(staticOrientation) {
+      return staticOrientation == null
+        || (
+          staticOrientation is map
+          && staticOrientation.keys().hasOnly([
+            'recommendedFacing',
+            'recommendedAzimuth',
+            'recommendedTiltDeg',
+            'initialAlignmentDeg',
+            'recommendationSummary',
+            'reason',
+            'axisNote'
+          ])
+          && validNullableString(staticOrientation.recommendedFacing)
+          && validNullableNumber(staticOrientation.recommendedAzimuth)
+          && validNullableNumber(staticOrientation.recommendedTiltDeg)
+          && validNullableNumber(staticOrientation.initialAlignmentDeg)
+          && validNullableString(staticOrientation.recommendationSummary)
+          && validNullableString(staticOrientation.reason)
+          && validNullableString(staticOrientation.axisNote)
+        );
+    }
+
+    function validTrackingPreferences(trackingPreferences) {
+      return trackingPreferences == null
+        || (
+          trackingPreferences is map
+          && trackingPreferences.keys().hasOnly([
+            'summary',
+            'detail',
+            'axisNote'
+          ])
+          && validNullableString(trackingPreferences.summary)
+          && validNullableString(trackingPreferences.detail)
+          && validNullableString(trackingPreferences.axisNote)
+        );
+    }
+
+    function validUserSetup(data, uid) {
+      return data.uid == uid
+        && data.keys().hasOnly([
+          'uid',
+          'location',
+          'operatingMode',
+          'setupCompleted',
+          'onboardingCompleted',
+          'updatedAt',
+          'createdAt',
+          'staticOrientation',
+          'trackingPreferences'
+        ])
+        && validLocation(data.location)
+        && data.operatingMode in ['static', 'tracking']
+        && data.setupCompleted is bool
+        && data.onboardingCompleted is bool
+        && validString(data.createdAt)
+        && validString(data.updatedAt)
+        && validStaticOrientation(data.staticOrientation)
+        && validTrackingPreferences(data.trackingPreferences);
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid);
+      allow create, update: if isOwner(uid) && validProfile(request.resource.data, uid);
+      allow delete: if false;
+    }
+
+    match /userSetups/{uid} {
+      allow read: if isOwner(uid);
+      allow create, update: if isOwner(uid) && validUserSetup(request.resource.data, uid);
+      allow delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
