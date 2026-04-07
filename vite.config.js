@@ -2,6 +2,8 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 
+import { cloudflare } from "@cloudflare/vite-plugin";
+
 export default defineConfig({
   build: {
     rollupOptions: {
@@ -34,33 +36,30 @@ export default defineConfig({
       },
     },
   },
-  plugins: [
-    react(),
-    VitePWA({
-      registerType: 'autoUpdate',
-      manifest: {
-        name: 'HelioSync',
-        short_name: 'HelioSync',
-        description: 'Monitoreo de trazador solar IoT',
-        theme_color: '#0B0D14',
-        background_color: '#0B0D14',
-        display: 'standalone',
-        icons: [
-          {
-             src: 'sun_icon192.png', // Placeholder
-             sizes: '192x192',
-             type: 'image/png'
-          },
-          {
-             src: 'sun_icon512.png', // Placeholder
-             sizes: '512x512',
-             type: 'image/png'
-          }
-        ]
-      },
-      workbox: {
-        globPatterns: ['**/*.{js,css,html,ico,png,svg}']
-      }
-    })
-  ]
+  plugins: [react(), VitePWA({
+    registerType: 'autoUpdate',
+    manifest: {
+      name: 'HelioSync',
+      short_name: 'HelioSync',
+      description: 'Monitoreo de trazador solar IoT',
+      theme_color: '#0B0D14',
+      background_color: '#0B0D14',
+      display: 'standalone',
+      icons: [
+        {
+           src: 'sun_icon192.png', // Placeholder
+           sizes: '192x192',
+           type: 'image/png'
+        },
+        {
+           src: 'sun_icon512.png', // Placeholder
+           sizes: '512x512',
+           type: 'image/png'
+        }
+      ]
+    },
+    workbox: {
+      globPatterns: ['**/*.{js,css,html,ico,png,svg}']
+    }
+  }), cloudflare()]
 });
