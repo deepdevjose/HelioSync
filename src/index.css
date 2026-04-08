@@ -21,4 +21,111 @@
       radial-gradient(circle at top right, rgba(125, 211, 252, 0.05), transparent 24%),
       linear-gradient(180deg, #0b0f17 0%, #0d1320 42%, #090d15 100%);
   }
+
+  .auth-solar-dot {
+    animation: auth-solar-drift 5.4s ease-in-out infinite;
+  }
+
+  .auth-solar-pulse {
+    animation: auth-solar-pulse 2.8s ease-out infinite;
+  }
+
+  .auth-solar-ray {
+    animation: auth-solar-ray 6.2s ease-in-out infinite;
+  }
+
+  .auth-solar-arc {
+    animation: auth-solar-arc 6.8s ease-in-out infinite;
+  }
+
+  .auth-solar-trail {
+    stroke: rgba(255, 255, 255, 0.14);
+    stroke-width: 1.15;
+    stroke-linecap: round;
+    stroke-dasharray: 3 10;
+    animation: auth-solar-trail 16s linear infinite;
+  }
+
+  .auth-solar-path {
+    stroke-width: 1.7;
+    stroke-linecap: round;
+    stroke-dasharray: 12 9;
+    animation: auth-solar-path 9.5s linear infinite;
+    filter: drop-shadow(0 0 8px rgba(125, 211, 252, 0.22));
+  }
+}
+
+@keyframes auth-solar-drift {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) scale(1);
+  }
+
+  50% {
+    transform: translate3d(0, -4px, 0) scale(1.04);
+  }
+}
+
+@keyframes auth-solar-pulse {
+  0% {
+    opacity: 0.55;
+    transform: scale(0.88);
+  }
+
+  70%,
+  100% {
+    opacity: 0;
+    transform: scale(1.22);
+  }
+}
+
+@keyframes auth-solar-ray {
+  0%,
+  100% {
+    opacity: 0.72;
+    filter: drop-shadow(0 0 10px rgba(125, 211, 252, 0.22));
+  }
+
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 0 16px rgba(251, 191, 36, 0.28));
+  }
+}
+
+@keyframes auth-solar-arc {
+  0%,
+  100% {
+    opacity: 0.18;
+    box-shadow: 0 0 0 rgba(125, 211, 252, 0);
+  }
+
+  50% {
+    opacity: 0.38;
+    box-shadow: 0 0 26px rgba(125, 211, 252, 0.08);
+  }
+}
+
+@keyframes auth-solar-trail {
+  from {
+    stroke-dashoffset: 0;
+    opacity: 0.2;
+  }
+
+  50% {
+    opacity: 0.34;
+  }
+
+  to {
+    stroke-dashoffset: -52;
+    opacity: 0.2;
+  }
+}
+
+@keyframes auth-solar-path {
+  from {
+    stroke-dashoffset: 0;
+  }
+
+  to {
+    stroke-dashoffset: -84;
+  }
 }

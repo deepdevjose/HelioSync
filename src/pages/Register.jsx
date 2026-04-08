@@ -95,23 +95,33 @@ export default function Register() {
           </div>
         ) : null}
 
-        <button
-          type="button"
-          onClick={handleGoogleRegister}
-          disabled={submission.length > 0}
-          className="flex w-full items-center justify-center gap-3 rounded-2xl border border-white/12 bg-white/[0.06] px-4 py-3 text-sm font-medium text-white transition hover:bg-white/[0.1] disabled:cursor-not-allowed disabled:opacity-70"
-        >
-          {submission === 'google' ? (
-            <LoaderCircle className="h-4 w-4 animate-spin" />
-          ) : (
-            <span className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-white text-xs font-semibold text-black">
-              G
-            </span>
-          )}
-          <span>{t('register.google')}</span>
-        </button>
+        <div className="space-y-3">
+          <div className="text-[10px] font-medium uppercase tracking-[0.28em] text-slate-500/72">
+            {t('register.googleSection')}
+          </div>
 
-        <div className="flex items-center gap-3 text-xs uppercase tracking-[0.24em] text-slate-500">
+          <button
+            type="button"
+            onClick={handleGoogleRegister}
+            disabled={submission.length > 0}
+            className="flex w-full items-center gap-4 rounded-[28px] border border-helium-300/16 bg-[linear-gradient(135deg,rgba(255,255,255,0.1),rgba(125,211,252,0.12),rgba(8,18,30,0.92))] px-4 py-4 text-left text-white shadow-[0_16px_38px_rgba(56,189,248,0.1)] transition duration-200 hover:-translate-y-0.5 hover:border-helium-300/28 hover:shadow-[0_24px_48px_rgba(56,189,248,0.16)] disabled:cursor-not-allowed disabled:opacity-70"
+          >
+            {submission === 'google' ? (
+              <LoaderCircle className="h-5 w-5 animate-spin text-white" />
+            ) : (
+              <span className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-white text-sm font-semibold text-slate-950 shadow-[0_10px_20px_rgba(15,23,42,0.25)]">
+                G
+              </span>
+            )}
+
+            <span className="min-w-0 flex-1">
+              <span className="block text-sm font-semibold">{t('register.google')}</span>
+              <span className="mt-1 block text-xs text-slate-300/72">{t('register.googleHint')}</span>
+            </span>
+          </button>
+        </div>
+
+        <div className="flex items-center gap-3 text-[11px] font-medium uppercase tracking-[0.18em] text-slate-500/80">
           <span className="h-px flex-1 bg-white/10" />
           {t('login.or')}
           <span className="h-px flex-1 bg-white/10" />
@@ -171,11 +181,11 @@ export default function Register() {
           <button
             type="submit"
             disabled={submission.length > 0 || !formIsValid}
-            className="flex w-full items-center justify-center gap-2 rounded-2xl bg-white px-4 py-3 text-sm font-semibold text-black transition hover:bg-slate-200 disabled:cursor-not-allowed disabled:opacity-70"
+            className="group flex w-full items-center justify-center gap-2 rounded-2xl border border-white/10 bg-[linear-gradient(180deg,rgba(255,255,255,0.98),rgba(241,245,249,0.96))] px-4 py-3 text-sm font-semibold text-slate-950 shadow-[0_10px_26px_rgba(255,255,255,0.08)] transition duration-200 hover:-translate-y-0.5 hover:border-helium-200/30 hover:bg-slate-100 hover:shadow-[0_0_0_10px_rgba(255,255,255,0.04),0_18px_34px_rgba(255,255,255,0.14)] disabled:cursor-not-allowed disabled:opacity-70"
           >
             {submission === 'email' ? <LoaderCircle className="h-4 w-4 animate-spin" /> : null}
             <span>{t('register.submit')}</span>
-            <ArrowRight className="h-4 w-4" />
+            <ArrowRight className="h-4 w-4 transition-transform duration-200 group-hover:translate-x-1" />
           </button>
         </form>
       </div>
