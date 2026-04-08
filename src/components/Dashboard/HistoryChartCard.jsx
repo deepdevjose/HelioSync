@@ -23,7 +23,8 @@ export default function HistoryChartCard() {
   const status = useHelioStore((state) => state.status);
   const data = useHelioStore((state) => state.data);
   const history = useHelioStore((state) => state.history);
-  const insights = getDashboardInsights(data, status, history, locale, t);
+  const userSetup = useHelioStore((state) => state.userSetup);
+  const insights = getDashboardInsights(data, status, history, userSetup, locale, t);
   const titleMap = {
     [t('insights.rising')]: t('history.risingWindow'),
     [t('insights.falling')]: t('history.fallingWindow'),
@@ -31,11 +32,11 @@ export default function HistoryChartCard() {
   };
 
   return (
-    <GlassCard delay={0.25} className="group flex min-h-[330px] min-w-0 flex-col gap-5 !p-6 md:!p-7">
+    <GlassCard delay={0.25} className="group flex min-h-[300px] min-w-0 flex-col gap-5 !p-5 sm:min-h-[330px] sm:!p-6 md:!p-7">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="space-y-2">
           <span className="text-[11px] font-medium uppercase tracking-[0.26em] text-slate-400">{t('dashboard.trend')}</span>
-          <h2 className="m-0 text-2xl font-semibold text-white">{titleMap[insights.trend.direction] || t('history.steadyWindow')}</h2>
+          <h2 className="m-0 text-[1.6rem] font-semibold text-white sm:text-2xl">{titleMap[insights.trend.direction] || t('history.steadyWindow')}</h2>
           <p className="m-0 text-sm leading-6 text-slate-400">{insights.trend.detail}</p>
         </div>
 
@@ -45,15 +46,15 @@ export default function HistoryChartCard() {
         </div>
       </div>
 
-      <div className="relative h-[250px] w-full min-w-0 sm:h-[280px]">
+      <div className="relative h-[220px] w-full min-w-0 sm:h-[260px] lg:h-[280px]">
         <ResponsiveContainer
           width="100%"
           height="100%"
-          minWidth={280}
-          minHeight={250}
+          minWidth={0}
+          minHeight={220}
           initialDimension={{ width: 640, height: 250 }}
         >
-          <AreaChart data={history} margin={{ top: 10, right: 8, left: -18, bottom: 0 }}>
+          <AreaChart data={history} margin={{ top: 10, right: 8, left: -22, bottom: 0 }}>
             <defs>
               <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
                 <stop offset="5%" stopColor="#38BDF8" stopOpacity={0.3} />
@@ -65,14 +66,14 @@ export default function HistoryChartCard() {
             <XAxis
               dataKey="time"
               stroke="#8a94a7"
-              fontSize={12}
+              fontSize={11}
               tickLine={false}
               axisLine={false}
               tickMargin={10}
             />
             <YAxis
               stroke="#8a94a7"
-              fontSize={12}
+              fontSize={11}
               tickLine={false}
               axisLine={false}
               tickFormatter={(value) => `${value}`}

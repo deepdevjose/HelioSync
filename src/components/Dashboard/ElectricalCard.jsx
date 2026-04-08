@@ -18,8 +18,9 @@ export default function ElectricalCard() {
   const data = useHelioStore((state) => state.data);
   const history = useHelioStore((state) => state.history);
   const lastUpdatedAt = useHelioStore((state) => state.lastUpdatedAt);
+  const userSetup = useHelioStore((state) => state.userSetup);
   const [now, setNow] = useState(() => Date.now());
-  const insights = getDashboardInsights(data, status, history, locale, t);
+  const insights = getDashboardInsights(data, status, history, userSetup, locale, t);
   const DirectionIcon = directionIcons[insights.outputState.symbol] || ArrowRight;
 
   useEffect(() => {
@@ -33,7 +34,7 @@ export default function ElectricalCard() {
   const updatedLabel = formatRelativeUpdate(lastUpdatedAt, locale, t, now);
 
   return (
-    <GlassCard delay={0.15} className="flex h-full min-h-[340px] flex-col justify-between gap-6 overflow-hidden !p-7">
+    <GlassCard delay={0.15} className="flex h-full min-h-[300px] flex-col justify-between gap-5 overflow-hidden !p-5 sm:min-h-[340px] sm:gap-6 sm:!p-6 lg:!p-7">
       <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
         <div className="space-y-3">
           <span className="text-[11px] font-medium uppercase tracking-[0.26em] text-slate-400">{t('dashboard.system')}</span>
@@ -45,7 +46,7 @@ export default function ElectricalCard() {
           </p>
         </div>
 
-        <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-300">
+        <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-300 lg:min-w-[190px]">
           <div className="text-[11px] uppercase tracking-[0.22em] text-slate-500">{t('dashboard.liveFeedback')}</div>
           <div className="mt-2 flex items-center gap-2">
             <span className="h-2 w-2 rounded-full bg-helium-400 animate-pulse" />
@@ -58,10 +59,10 @@ export default function ElectricalCard() {
         <div className="space-y-2">
           <span className="text-[11px] font-medium uppercase tracking-[0.26em] text-slate-400">{t('dashboard.output')}</span>
           <div className="flex flex-wrap items-end gap-3">
-            <span className="text-6xl font-light tracking-[-0.05em] text-white lg:text-7xl">
+            <span className="text-5xl font-light tracking-[-0.05em] text-white sm:text-6xl lg:text-7xl">
               <CountUp end={data.electrical.power_w} decimals={1} duration={1.8} separator="," />
             </span>
-            <span className="pb-3 text-2xl font-semibold text-helium-400">W</span>
+            <span className="pb-2 text-xl font-semibold text-helium-400 sm:pb-3 sm:text-2xl">W</span>
           </div>
         </div>
 
@@ -70,7 +71,7 @@ export default function ElectricalCard() {
           <span>{insights.outputState.label}</span>
         </div>
 
-        <p className="m-0 max-w-2xl text-base leading-7 text-slate-300">
+        <p className="m-0 max-w-2xl text-sm leading-6 text-slate-300 sm:text-base sm:leading-7">
           {insights.outputState.reason}
         </p>
       </div>

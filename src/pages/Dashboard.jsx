@@ -6,11 +6,11 @@ import SystemViewCard from '../components/Dashboard/SystemViewCard';
 
 export default function Dashboard() {
   return (
-    <div className="min-h-screen glass-mesh-bg px-4 py-5 md:px-8 md:py-8">
-      <div className="mx-auto flex max-w-7xl flex-col gap-5">
+    <div className="min-h-screen glass-mesh-bg px-3 py-4 sm:px-4 sm:py-5 md:px-8 md:py-8">
+      <div className="mx-auto flex max-w-7xl flex-col gap-4 sm:gap-5">
         <Header />
 
-        <div className="grid grid-cols-1 gap-5 lg:grid-cols-12">
+        <div className="grid grid-cols-1 gap-4 sm:gap-5 lg:grid-cols-12">
           <div className="min-w-0 lg:col-span-12">
             <SystemViewCard />
           </div>

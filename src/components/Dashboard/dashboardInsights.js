@@ -1,4 +1,5 @@
 import { formatLocaleNumber } from '../../i18n/locale';
+import { getSystemProfile, resolveSetupContext } from '../../services/userData';
 
 const STATUS_META = {
   optimal: {
@@ -48,6 +49,72 @@ function getModeLabel(panel, t) {
   }
 
   return t('insights.staticMode');
+}
+
+function getContext(setup, status) {
+  const fallbackProfile = getSystemProfile(setup?.systemProfile || (status === 'ESP AP' ? 'outdoor' : 'home'));
+  return resolveSetupContext({
+    ...setup,
+    systemProfile: fallbackProfile,
+  });
+}
+
+function getProfileLabel(context, t) {
+  return context.systemProfile === 'outdoor' ? t('insights.profileOutdoor') : t('insights.profileHome');
+}
+
+function getConnectivityModeLabel(context, t) {
+  return context.connectivityMode === 'connected'
+    ? t('insights.connectivityConnected')
+    : t('insights.connectivityAutonomous');
+}
+
+function getProfileMessage(context, t) {
+  return context.systemProfile === 'outdoor'
+    ? t('insights.profileOutdoorMessage')
+    : t('insights.profileHomeMessage');
+}
+
+function getDeviceState(status, panel, context, t) {
+  const angleError = Math.abs(panel.angle_error_deg);
+
+  if (context.connectivityMode === 'connected' && status === 'Offline') {
+    return {
+      label: t('insights.deviceOffline'),
+      tone: 'danger',
+      reason: t('insights.deviceOfflineReason'),
+    };
+  }
+
+  if (panel.servo_active || angleError > 2) {
+    return {
+      label: t('insights.deviceCorrecting'),
+      tone: 'warning',
+      reason: t('insights.deviceCorrectingReason'),
+    };
+  }
+
+  if (isTrackingMode(panel)) {
+    return {
+      label: t('insights.deviceTracking'),
+      tone: 'positive',
+      reason: t('insights.deviceTrackingReason'),
+    };
+  }
+
+  return {
+    label: t('insights.deviceIdle'),
+    tone: 'neutral',
+    reason: t('insights.deviceIdleReason'),
+  };
+}
+
+function getSyncLabel(context, status, t) {
+  if (context.connectivityMode === 'autonomous') {
+    return t('insights.syncAutonomous');
+  }
+
+  return status === 'Offline' ? t('insights.offlineLink') : t('insights.syncConnected');
 }
 
 function getTrackingStatus(panel, t) {
@@ -125,8 +192,8 @@ function getOutputState(power, lux, t) {
   };
 }
 
-function getSystemState(status, panel, environment, outputState, t) {
-  if (status === 'Offline') {
+function getSystemState(status, panel, environment, outputState, context, t) {
+  if (context.connectivityMode === 'connected' && status === 'Offline') {
     return {
       label: t(`insights.${STATUS_META.offline.key}`),
       tone: STATUS_META.offline.tone,
@@ -262,16 +329,19 @@ export function formatRelativeUpdate(lastUpdatedAt, locale, t, referenceTime = D
   return t('insights.updatedHoursAgo', { value: formatNumber(diffHours, locale, 0) });
 }
 
-export function getDashboardInsights(data, status, history, locale, t) {
+export function getDashboardInsights(data, status, history, userSetup, locale, t) {
+  const context = getContext(userSetup, status);
   const outputState = getOutputState(data.electrical.power_w, data.environment.lux_bh1750, t);
-  const systemState = getSystemState(status, data.panel, data.environment, outputState, t);
+  const systemState = getSystemState(status, data.panel, data.environment, outputState, context, t);
   const trend = getTrendSummary(history, data.simHour, data.electrical.power_w, locale, t);
   const trackingStatus = getTrackingStatus(data.panel, t);
+  const deviceState = getDeviceState(status, data.panel, context, t);
 
   return {
     outputState,
     systemState,
     trend,
+    deviceState,
     supportMetrics: [
       {
         label: t('insights.voltage'),
@@ -282,8 +352,8 @@ export function getDashboardInsights(data, status, history, locale, t) {
         value: `${formatNumber(data.electrical.current_a, locale, 2)} A`,
       },
       {
-        label: t('insights.tracking'),
-        value: trackingStatus.supportLabel,
+        label: t('dashboard.deviceState'),
+        value: deviceState.label,
       },
     ],
     environment: [
@@ -307,8 +377,12 @@ export function getDashboardInsights(data, status, history, locale, t) {
       },
     ],
     connectionLabel: status === 'ESP AP' ? t('insights.localLink') : status === 'Online' ? t('insights.liveLink') : t('insights.offlineLink'),
+    connectivityModeLabel: getConnectivityModeLabel(context, t),
+    profileLabel: getProfileLabel(context, t),
+    profileMessage: getProfileMessage(context, t),
     locationLabel: data.meta.location,
     modeLabel: getModeLabel(data.panel, t),
     trackingLabel: trackingStatus.heroLabel,
+    syncLabel: getSyncLabel(context, status, t),
   };
 }

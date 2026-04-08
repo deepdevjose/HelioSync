@@ -2,7 +2,7 @@ import { Suspense, lazy, useEffect } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import AppLoader from './components/ui/AppLoader';
 import { useHelioStore } from './store/useHelioStore';
-import { subscribeToSession } from './services/authClient';
+import { getAuthProvider, subscribeToSession } from './services/authClient';
 import { getUserSetup, syncUserProfileFromSession } from './services/userData';
 import { useLocale } from './i18n/locale';
 
@@ -106,8 +106,16 @@ export default function App() {
 
         setUserProfile(profile);
         setUserSetup(setup);
-      } catch {
-        setUserProfile(null);
+      } catch (userContextError) {
+        console.error('Failed to sync user context from Firebase.', userContextError);
+        setUserProfile({
+          uid: user.uid,
+          displayName: user.displayName || '',
+          email: user.email || '',
+          provider: getAuthProvider(user),
+          createdAt: user.metadata?.creationTime || new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
         setUserSetup(null);
       } finally {
         setAuthReady(true);

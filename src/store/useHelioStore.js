@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import { applySetupToTelemetry } from '../services/userData';
+import { applySetupToTelemetry, getConnectivityStatus } from '../services/userData';
 
 /**
  * @typedef {Object} MetaInfo
@@ -136,6 +136,7 @@ export const useHelioStore = create((set) => ({
       userSetup ? state.data : structuredClone(baseTelemetryData),
       userSetup,
     ),
+    status: userSetup ? getConnectivityStatus(userSetup) : state.status,
   })),
 
   clearUserContext: () => set({

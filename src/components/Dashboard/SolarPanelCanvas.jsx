@@ -974,7 +974,7 @@ export default function SolarPanelCanvas({ compact = false }) {
   };
 
   return (
-    <div className={`relative w-full min-w-0 overflow-hidden rounded-3xl glass-panel group shadow-[0_0_30px_rgba(0,0,0,0.5)] transition-shadow hover:shadow-[0_0_40px_rgba(56,189,248,0.1)] ${compact ? 'h-[240px] sm:h-[280px]' : 'h-[360px] sm:h-[430px] lg:h-[620px]'}`}>
+    <div className={`relative w-full min-w-0 overflow-hidden rounded-3xl glass-panel group shadow-[0_0_30px_rgba(0,0,0,0.5)] transition-shadow hover:shadow-[0_0_40px_rgba(56,189,248,0.1)] ${compact ? 'h-[220px] sm:h-[280px]' : 'h-[320px] sm:h-[430px] lg:h-[620px]'}`}>
       <div
         className="pointer-events-none absolute inset-0 z-[1]"
         style={{
@@ -990,17 +990,17 @@ export default function SolarPanelCanvas({ compact = false }) {
         }}
       />
 
-      <div className="absolute top-4 left-4 z-10 px-3 py-1 rounded-full bg-black/40 backdrop-blur border border-white/10 text-xs font-mono text-gray-300 shadow-md">
+      <div className="absolute left-3 top-3 z-10 max-w-[calc(100%-7rem)] rounded-full border border-white/10 bg-black/40 px-2.5 py-1 text-[10px] font-mono text-gray-300 shadow-md backdrop-blur sm:left-4 sm:top-4 sm:max-w-none sm:px-3 sm:text-xs">
         {t('solar.tilt')} {formatLocaleNumber(locale, solarState.panel.measuredTilt, { maximumFractionDigits: 1, minimumFractionDigits: 1 })}° · {t('solar.azimuth')} {formatLocaleNumber(locale, solarState.panel.azimuth, { maximumFractionDigits: 0 })}°
         {Math.abs(panelData.angle_error_deg) > 0.5 && (
-          <span className="ml-2 text-red-400">{t('solar.error')}: {formatLocaleNumber(locale, panelData.angle_error_deg, { maximumFractionDigits: 1, minimumFractionDigits: 1 })}°</span>
+          <span className="ml-2 hidden text-red-400 sm:inline">{t('solar.error')}: {formatLocaleNumber(locale, panelData.angle_error_deg, { maximumFractionDigits: 1, minimumFractionDigits: 1 })}°</span>
         )}
       </div>
-      <div className="absolute top-4 right-4 z-10 rounded-2xl border border-helium-500/18 bg-black/42 px-3 py-2 text-right shadow-[0_0_20px_rgba(56,189,248,0.12)] backdrop-blur">
+      <div className="absolute right-3 top-3 z-10 max-w-[9rem] rounded-2xl border border-helium-500/18 bg-black/42 px-2.5 py-2 text-right shadow-[0_0_20px_rgba(56,189,248,0.12)] backdrop-blur sm:right-4 sm:top-4 sm:max-w-none sm:px-3">
         <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-helium-300">{motionState}</div>
         <div className="mt-1 text-[10px] uppercase tracking-[0.18em] text-slate-400">{mountLabel}</div>
       </div>
-      <div className="absolute bottom-4 left-4 right-4 z-10 rounded-2xl border border-white/10 bg-black/34 px-4 py-3 backdrop-blur-md shadow-[0_12px_30px_rgba(0,0,0,0.28)] sm:left-1/2 sm:right-auto sm:min-w-[240px] sm:-translate-x-1/2">
+      <div className="absolute bottom-3 left-3 right-3 z-10 rounded-2xl border border-white/10 bg-black/34 px-4 py-3 backdrop-blur-md shadow-[0_12px_30px_rgba(0,0,0,0.28)] sm:bottom-4 sm:left-1/2 sm:right-auto sm:min-w-[240px] sm:-translate-x-1/2">
         <div className="text-[10px] font-semibold uppercase tracking-[0.26em] text-white/55">
           {t('solar.alignmentLabel')}
         </div>
@@ -1014,7 +1014,7 @@ export default function SolarPanelCanvas({ compact = false }) {
           })}
         </div>
       </div>
-      <div className="absolute bottom-4 right-4 z-10 rounded-2xl border border-amber-400/14 bg-[linear-gradient(180deg,rgba(251,191,36,0.12),rgba(0,0,0,0.18))] px-4 py-3 backdrop-blur-md shadow-[0_12px_30px_rgba(0,0,0,0.24)]">
+      <div className="absolute bottom-[5.8rem] left-3 right-3 z-10 rounded-2xl border border-amber-400/14 bg-[linear-gradient(180deg,rgba(251,191,36,0.12),rgba(0,0,0,0.18))] px-4 py-3 backdrop-blur-md shadow-[0_12px_30px_rgba(0,0,0,0.24)] sm:bottom-4 sm:left-auto sm:right-4 sm:w-auto">
         <div className="text-[10px] font-semibold uppercase tracking-[0.26em] text-amber-100/70">
           {t('solar.geometryLabel')}
         </div>

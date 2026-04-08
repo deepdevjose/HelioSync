@@ -46,6 +46,7 @@ service cloud.firestore {
           'city',
           'region',
           'country',
+          'timezone',
           'latitude',
           'longitude',
           'label'
@@ -54,6 +55,7 @@ service cloud.firestore {
         && validNullableString(location.city)
         && validNullableString(location.region)
         && validNullableString(location.country)
+        && validNullableString(location.timezone)
         && validNullableNumber(location.latitude)
         && validNullableNumber(location.longitude)
         && validNullableString(location.label);
@@ -102,6 +104,9 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'uid',
           'location',
+          'systemProfile',
+          'connectivityMode',
+          'syncEnabled',
           'operatingMode',
           'setupCompleted',
           'onboardingCompleted',
@@ -111,6 +116,9 @@ service cloud.firestore {
           'trackingPreferences'
         ])
         && validLocation(data.location)
+        && data.systemProfile in ['outdoor', 'home']
+        && data.connectivityMode in ['autonomous', 'connected']
+        && data.syncEnabled is bool
         && data.operatingMode in ['static', 'tracking']
         && data.setupCompleted is bool
         && data.onboardingCompleted is bool

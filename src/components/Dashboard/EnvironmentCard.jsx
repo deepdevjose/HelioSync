@@ -21,13 +21,14 @@ export default function EnvironmentCard() {
   const status = useHelioStore((state) => state.status);
   const data = useHelioStore((state) => state.data);
   const history = useHelioStore((state) => state.history);
-  const insights = getDashboardInsights(data, status, history, locale, t);
+  const userSetup = useHelioStore((state) => state.userSetup);
+  const insights = getDashboardInsights(data, status, history, userSetup, locale, t);
 
   return (
-    <GlassCard delay={0.2} className="flex h-full min-h-[340px] flex-col gap-5 !p-6 md:!p-7">
+    <GlassCard delay={0.2} className="flex h-full min-h-[300px] flex-col gap-5 !p-5 sm:min-h-[340px] sm:!p-6 md:!p-7">
       <div className="space-y-2">
         <span className="text-[11px] font-medium uppercase tracking-[0.26em] text-slate-400">{t('dashboard.environment')}</span>
-        <h2 className="m-0 text-2xl font-semibold text-white">{t('dashboard.whySystemLooksThisWay')}</h2>
+        <h2 className="m-0 text-[1.6rem] font-semibold text-white sm:text-2xl">{t('dashboard.whySystemLooksThisWay')}</h2>
         <p className="m-0 text-sm leading-6 text-slate-400">
           {t('dashboard.contextFirst')}
         </p>
@@ -38,14 +39,14 @@ export default function EnvironmentCard() {
           const Icon = environmentIcons[item.key];
 
           return (
-            <div key={item.key} className="rounded-3xl border border-white/[0.08] bg-black/10 p-4">
-              <div className="flex items-start gap-4">
-                <div className={`rounded-2xl border p-3 ${environmentTones[item.key]}`}>
+            <div key={item.key} className="rounded-[24px] border border-white/[0.08] bg-black/10 p-4 sm:rounded-3xl">
+              <div className="flex items-start gap-3 sm:gap-4">
+                <div className={`rounded-2xl border p-2.5 sm:p-3 ${environmentTones[item.key]}`}>
                   <Icon className="h-5 w-5" />
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="text-[11px] uppercase tracking-[0.24em] text-slate-500">{item.label}</div>
-                  <div className="mt-2 text-lg font-medium text-white">{item.meaning}</div>
+                  <div className="mt-2 text-base font-medium text-white sm:text-lg">{item.meaning}</div>
                   <div className="mt-1 text-sm text-slate-400">{item.value}</div>
                 </div>
               </div>

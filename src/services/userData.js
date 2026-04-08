@@ -81,6 +81,32 @@ function buildLocationLabel(location = {}) {
   return '';
 }
 
+export function getSystemProfile(profile = 'home') {
+  return profile === 'outdoor' ? 'outdoor' : 'home';
+}
+
+export function getDefaultConnectivityMode(systemProfile = 'home') {
+  return getSystemProfile(systemProfile) === 'outdoor' ? 'autonomous' : 'connected';
+}
+
+export function resolveSetupContext(setup = {}) {
+  const systemProfile = getSystemProfile(setup.systemProfile);
+  const connectivityMode = setup.connectivityMode || getDefaultConnectivityMode(systemProfile);
+  const syncEnabled = setup.syncEnabled ?? connectivityMode === 'connected';
+
+  return {
+    ...setup,
+    systemProfile,
+    connectivityMode,
+    syncEnabled,
+  };
+}
+
+export function getConnectivityStatus(setup = {}) {
+  const { connectivityMode } = resolveSetupContext(setup);
+  return connectivityMode === 'connected' ? 'Online' : 'ESP AP';
+}
+
 export function getModePresentation(mode) {
   return mode === 'tracking'
     ? {
@@ -100,9 +126,12 @@ export function applySetupToTelemetry(data, setup) {
     return data;
   }
 
+  const resolvedSetup = resolveSetupContext(setup);
   const locationLabel = buildLocationLabel(setup.location) || data.meta.location;
-  const modePresentation = getModePresentation(setup.operatingMode);
-  const nextAngle = setup.staticOrientation?.initialAlignmentDeg;
+  const modePresentation = getModePresentation(resolvedSetup.operatingMode);
+  const nextAngle = resolvedSetup.staticOrientation?.initialAlignmentDeg;
+  const profilePrefix = resolvedSetup.systemProfile;
+  const syncSuffix = resolvedSetup.syncEnabled ? 'synced' : 'local';
 
   return {
     ...data,
@@ -115,11 +144,11 @@ export function applySetupToTelemetry(data, setup) {
       ...data.panel,
       tracking_mode: modePresentation.telemetryMode,
       angle_target_deg: Number.isFinite(nextAngle) ? nextAngle : data.panel.angle_target_deg,
-      servo_active: setup.operatingMode === 'tracking' ? data.panel.servo_active : false,
+      servo_active: resolvedSetup.operatingMode === 'tracking' ? data.panel.servo_active : false,
     },
     diagnostics: {
       ...data.diagnostics,
-      profile: modePresentation.diagnosticsProfile,
+      profile: `${profilePrefix}_${modePresentation.diagnosticsProfile}_${syncSuffix}`,
       simulation: data.diagnostics.simulation,
     },
   };
