@@ -1,5 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
-
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -13,6 +11,19 @@
 @layer utilities {
   .glass-panel {
     @apply border border-white/10 bg-slate-900/80 backdrop-blur-xl shadow-[0_24px_64px_rgba(0,0,0,0.28)];
+  }
+
+  .heliosync-canvas-stage,
+  .heliosync-canvas-stage > div,
+  .heliosync-canvas-stage canvas {
+    position: absolute !important;
+    inset: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+  }
+
+  .heliosync-canvas-stage canvas {
+    display: block !important;
   }
   
   .glass-mesh-bg {

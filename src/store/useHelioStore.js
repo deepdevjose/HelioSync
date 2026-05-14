@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { appendLiveHistory, normalizeDevicePayload } from '../services/heliosyncDevice';
 import { applySetupToTelemetry, getConnectivityStatus } from '../services/userData';
 
 /**
@@ -22,6 +23,7 @@ import { applySetupToTelemetry, getConnectivityStatus } from '../services/userDa
  * @property {number} angle_target_deg
  * @property {number} angle_measured_deg
  * @property {number} angle_error_deg
+ * @property {number} azimuth_deg
  * @property {boolean} gyro_stable
  * @property {boolean} servo_active
  * @property {string} tracking_mode
@@ -71,6 +73,8 @@ const initialMockData = {
     angle_target_deg: 54.0,
     angle_measured_deg: 53.8,
     angle_error_deg: -0.2,
+    roll_deg: 0,
+    azimuth_deg: 180,
     gyro_stable: true,
     servo_active: false,
     tracking_mode: "STATIC"
@@ -83,6 +87,25 @@ const initialMockData = {
   diagnostics: {
     simulation: true,
     profile: "clear_sky_static_panel"
+  },
+  solar: {
+    azimuth_deg: 180,
+    elevation_deg: 45,
+    valid: false,
+  },
+  alert: {
+    active: false,
+    message: '',
+    error_deg: 0,
+  },
+  storage: {
+    days_stored: 0,
+    used_kb: 0,
+    max_kb: 1200,
+    used_percent: 0,
+    near_full: false,
+    retention_days: 30,
+    cloud_ready: false,
   }
 };
 
@@ -111,6 +134,7 @@ export const useHelioStore = create((set) => ({
   data: structuredClone(baseTelemetryData),
   history: initialHistory,
   lastUpdatedAt: Date.now(),
+  telemetrySource: 'mock', // 'mock' | 'device'
   session: null, // Firebase Auth session
   authReady: false,
   userProfile: null,
@@ -121,6 +145,21 @@ export const useHelioStore = create((set) => ({
     lastUpdatedAt: Date.now(),
     // Actualizar historial aquí si fuera necesario
   })),
+
+  ingestDevicePayload: (payload) => set((state) => {
+    const nextData = normalizeDevicePayload(payload, state.data);
+
+    return {
+      data: nextData,
+      history: appendLiveHistory(
+        state.telemetrySource === 'device' ? state.history : [],
+        nextData,
+      ),
+      lastUpdatedAt: Date.now(),
+      telemetrySource: 'device',
+      status: 'ESP AP',
+    };
+  }),
   
   setStatus: (newStatus) => set({ status: newStatus }),
   
@@ -132,10 +171,12 @@ export const useHelioStore = create((set) => ({
 
   setUserSetup: (userSetup) => set((state) => ({
     userSetup,
-    data: applySetupToTelemetry(
-      userSetup ? state.data : structuredClone(baseTelemetryData),
-      userSetup,
-    ),
+    data: state.telemetrySource === 'device'
+      ? state.data
+      : applySetupToTelemetry(
+          userSetup ? state.data : structuredClone(baseTelemetryData),
+          userSetup,
+        ),
     status: userSetup ? getConnectivityStatus(userSetup) : state.status,
   })),
 
@@ -144,5 +185,7 @@ export const useHelioStore = create((set) => ({
     userProfile: null,
     userSetup: null,
     data: structuredClone(baseTelemetryData),
+    history: initialHistory,
+    telemetrySource: 'mock',
   }),
 }));

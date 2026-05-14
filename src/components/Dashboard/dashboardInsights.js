@@ -40,7 +40,8 @@ function getExpectedPower(lux) {
 }
 
 function isTrackingMode(panel) {
-  return `${panel.tracking_mode || ''}`.trim().toUpperCase() === 'TRACKING';
+  const mode = `${panel.tracking_mode || ''}`.trim().toUpperCase();
+  return Boolean(mode && mode !== 'STATIC' && mode !== 'OFF' && mode !== 'FIXED');
 }
 
 function getModeLabel(panel, t) {

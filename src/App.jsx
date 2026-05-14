@@ -1,18 +1,25 @@
-import { Suspense, lazy, useEffect } from 'react';
+import { Suspense, lazy, useEffect, useState } from 'react';
 import { Navigate, Route, Routes } from 'react-router-dom';
 import AppLoader from './components/ui/AppLoader';
 import { useHelioStore } from './store/useHelioStore';
 import { getAuthProvider, subscribeToSession } from './services/authClient';
+import { fetchDeviceSetupStatus, isSetupComplete } from './services/deviceSetup';
 import { getUserSetup, syncUserProfileFromSession } from './services/userData';
 import { useLocale } from './i18n/locale';
+import { AUTH_REQUIRED, isDevicePortalOrigin } from './config/runtime';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
+const DeviceOnboarding = lazy(() => import('./pages/DeviceOnboarding'));
 const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
 const Login = lazy(() => import('./pages/Login'));
 const Onboarding = lazy(() => import('./pages/Onboarding'));
 const Register = lazy(() => import('./pages/Register'));
 
 function resolveUserPath(session, userSetup) {
+  if (!AUTH_REQUIRED) {
+    return '/dashboard';
+  }
+
   if (!session) {
     return '/login';
   }
@@ -54,6 +61,10 @@ function DashboardRoute({ children }) {
   const session = useHelioStore((state) => state.session);
   const userSetup = useHelioStore((state) => state.userSetup);
 
+  if (!AUTH_REQUIRED) {
+    return children;
+  }
+
   if (!session) {
     return <Navigate to="/login" replace />;
   }
@@ -76,6 +87,36 @@ function RouteLoader() {
   );
 }
 
+function DeviceRootRedirect() {
+  const [target, setTarget] = useState(null);
+
+  useEffect(() => {
+    let active = true;
+
+    fetchDeviceSetupStatus()
+      .then((status) => {
+        if (active) {
+          setTarget(isSetupComplete(status) ? '/dashboard' : '/setup');
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setTarget('/setup');
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  if (!target) {
+    return <RouteLoader />;
+  }
+
+  return <Navigate to={target} replace />;
+}
+
 export default function App() {
   const authReady = useHelioStore((state) => state.authReady);
   const setAuthReady = useHelioStore((state) => state.setAuthReady);
@@ -85,8 +126,19 @@ export default function App() {
   const clearUserContext = useHelioStore((state) => state.clearUserContext);
   const session = useHelioStore((state) => state.session);
   const userSetup = useHelioStore((state) => state.userSetup);
+  const devicePortal = isDevicePortalOrigin();
 
   useEffect(() => {
+    if (devicePortal) {
+      setAuthReady(true);
+      return undefined;
+    }
+
+    if (!AUTH_REQUIRED) {
+      setAuthReady(true);
+      return undefined;
+    }
+
     const unsubscribe = subscribeToSession(async (user) => {
       setAuthReady(false);
 
@@ -123,7 +175,7 @@ export default function App() {
     });
 
     return () => unsubscribe();
-  }, [clearUserContext, setAuthReady, setSession, setUserProfile, setUserSetup]);
+  }, [clearUserContext, devicePortal, setAuthReady, setSession, setUserProfile, setUserSetup]);
 
   if (!authReady) {
     return <RouteLoader />;
@@ -131,8 +183,16 @@ export default function App() {
 
   return (
     <Suspense fallback={<RouteLoader />}>
-      <Routes>
-        <Route path="/" element={<Navigate to={resolveUserPath(session, userSetup)} replace />} />
+      {devicePortal ? (
+        <Routes>
+          <Route path="/" element={<DeviceRootRedirect />} />
+          <Route path="/setup" element={<DeviceOnboarding />} />
+          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="*" element={<DeviceRootRedirect />} />
+        </Routes>
+      ) : (
+        <Routes>
+          <Route path="/" element={<Navigate to={resolveUserPath(session, userSetup)} replace />} />
         <Route
           path="/login"
           element={(
@@ -174,7 +234,8 @@ export default function App() {
           )}
         />
         <Route path="*" element={<Navigate to={resolveUserPath(session, userSetup)} replace />} />
-      </Routes>
+        </Routes>
+      )}
     </Suspense>
   );
 }

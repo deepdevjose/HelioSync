@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas, useFrame, useThree } from '@react-three/fiber';
 import { Html, Line } from '@react-three/drei';
-import { AlertTriangle, RotateCcw } from 'lucide-react';
+import { AlertTriangle, CheckCircle2, RotateCcw, Volume2, VolumeX } from 'lucide-react';
 import { useHelioStore } from '../../store/useHelioStore';
 import * as THREE from 'three';
 import { formatLocaleNumber, useLocale } from '../../i18n/locale';
+import { buildSolarGeometryGuide } from '../../services/solarGeometry';
 
 const PANEL_COLUMNS = 6;
 const PANEL_ROWS = 10;
@@ -13,29 +14,100 @@ const PANEL_SURFACE_HEIGHT = 3.7;
 const PANEL_CELL_GAP = 0.04;
 const PANEL_CELL_WIDTH = (PANEL_SURFACE_WIDTH - (PANEL_COLUMNS - 1) * PANEL_CELL_GAP) / PANEL_COLUMNS;
 const PANEL_CELL_HEIGHT = (PANEL_SURFACE_HEIGHT - (PANEL_ROWS - 1) * PANEL_CELL_GAP) / PANEL_ROWS;
-const PANEL_CELL_POSITIONS = Array.from({ length: PANEL_COLUMNS * PANEL_ROWS }, (_, index) => {
-  const column = index % PANEL_COLUMNS;
-  const row = Math.floor(index / PANEL_COLUMNS);
-
-  return {
-    key: `${row}-${column}`,
-    x: (-PANEL_SURFACE_WIDTH / 2) + (PANEL_CELL_WIDTH / 2) + column * (PANEL_CELL_WIDTH + PANEL_CELL_GAP),
-    z: (-PANEL_SURFACE_HEIGHT / 2) + (PANEL_CELL_HEIGHT / 2) + row * (PANEL_CELL_HEIGHT + PANEL_CELL_GAP),
-  };
-});
-
-const FRAME_RAIL_X = [-1.18, 1.18];
-const FRAME_RAIL_Z = [-1.72, -0.58, 0.58, 1.72];
-const WORLD_RIGHT = new THREE.Vector3(1, 0, 0);
+const ALIGNMENT_TILT_TOLERANCE_DEG = 1.5;
+const ALIGNMENT_INCIDENCE_TOLERANCE_DEG = 18;
+const PANEL_LOCAL_WIDTH_AXIS = new THREE.Vector3(1, 0, 0);
+const PANEL_LOCAL_LENGTH_AXIS = new THREE.Vector3(0, 0, 1);
 const WORLD_UP = new THREE.Vector3(0, 1, 0);
 const PANEL_PIVOT_OFFSET = new THREE.Vector3(0, 0.22, 0);
 const PANEL_BASE_AZIMUTH = 180;
 const SUNRISE_HOUR = 6;
 const SUNSET_HOUR = 18.5;
 const SOLAR_RADIUS = 9.3;
+const MOBILE_VIEW_QUERY = '(max-width: 639px)';
 
 function isFiniteNumber(value) {
   return Number.isFinite(value);
+}
+
+function normalizeDegrees(value, fallback = 0) {
+  if (!isFiniteNumber(value)) {
+    return fallback;
+  }
+
+  return ((value % 360) + 360) % 360;
+}
+
+function createPanelFaceTexture() {
+  if (typeof document === 'undefined') {
+    return null;
+  }
+
+  const canvas = document.createElement('canvas');
+  canvas.width = 768;
+  canvas.height = 1024;
+  const ctx = canvas.getContext('2d');
+
+  if (!ctx) {
+    return null;
+  }
+
+  const background = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+  background.addColorStop(0, '#0E2235');
+  background.addColorStop(0.52, '#071522');
+  background.addColorStop(1, '#102A44');
+  ctx.fillStyle = background;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const pad = 30;
+  const gap = 8;
+  const cellWidth = (canvas.width - pad * 2 - gap * (PANEL_COLUMNS - 1)) / PANEL_COLUMNS;
+  const cellHeight = (canvas.height - pad * 2 - gap * (PANEL_ROWS - 1)) / PANEL_ROWS;
+
+  for (let row = 0; row < PANEL_ROWS; row += 1) {
+    for (let column = 0; column < PANEL_COLUMNS; column += 1) {
+      const x = pad + column * (cellWidth + gap);
+      const y = pad + row * (cellHeight + gap);
+      const cell = ctx.createLinearGradient(x, y, x + cellWidth, y + cellHeight);
+      cell.addColorStop(0, '#164E79');
+      cell.addColorStop(0.48, '#092038');
+      cell.addColorStop(1, '#061320');
+
+      ctx.fillStyle = cell;
+      ctx.fillRect(x, y, cellWidth, cellHeight);
+      ctx.strokeStyle = 'rgba(125, 211, 252, 0.28)';
+      ctx.lineWidth = 1.2;
+      ctx.strokeRect(x + 0.5, y + 0.5, cellWidth - 1, cellHeight - 1);
+    }
+  }
+
+  const sheen = ctx.createLinearGradient(0, 0, canvas.width, canvas.height * 0.55);
+  sheen.addColorStop(0, 'rgba(255, 255, 255, 0.20)');
+  sheen.addColorStop(0.18, 'rgba(255, 255, 255, 0.03)');
+  sheen.addColorStop(1, 'rgba(255, 255, 255, 0)');
+  ctx.fillStyle = sheen;
+  ctx.beginPath();
+  ctx.moveTo(0, 0);
+  ctx.lineTo(canvas.width * 0.62, 0);
+  ctx.lineTo(canvas.width * 0.2, canvas.height);
+  ctx.lineTo(0, canvas.height);
+  ctx.closePath();
+  ctx.fill();
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 4;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function dampAngle(current, target, easing, delta) {
+  const shortestTarget = current + Math.atan2(
+    Math.sin(target - current),
+    Math.cos(target - current),
+  );
+
+  return THREE.MathUtils.damp(current, shortestTarget, easing, delta);
 }
 
 function normalizeHour(hour) {
@@ -63,7 +135,30 @@ function toWorldVector(displayAzimuth, altitude, radius = SOLAR_RADIUS) {
   );
 }
 
-function getSunState(simHour, lux = 0) {
+function getSunState(simHour, lux = 0, solar) {
+  if (
+    solar?.valid &&
+    isFiniteNumber(solar.azimuth_deg) &&
+    isFiniteNumber(solar.elevation_deg)
+  ) {
+    const altitude = THREE.MathUtils.clamp(solar.elevation_deg, -8, 84);
+    const azimuth = ((solar.azimuth_deg % 360) + 360) % 360;
+    const daylight = altitude > 0;
+    const position = toWorldVector(azimuth, altitude);
+    const irradianceFactor = daylight
+      ? THREE.MathUtils.clamp((lux || 0) / 70000, 0.18, 1)
+      : 0.06;
+
+    return {
+      hour: normalizeHour(simHour),
+      daylight,
+      altitude,
+      azimuth,
+      position,
+      irradianceFactor,
+    };
+  }
+
   const hour = normalizeHour(simHour);
   const daylightProgress = (hour - SUNRISE_HOUR) / (SUNSET_HOUR - SUNRISE_HOUR);
   const clampedProgress = THREE.MathUtils.clamp(daylightProgress, 0, 1);
@@ -98,42 +193,60 @@ function supportsTracking(mode) {
   return normalized && normalized !== 'STATIC' && normalized !== 'OFF';
 }
 
-function getPanelWorldPoint(x, y, z, tilt, scenePan) {
-  return new THREE.Vector3(x, y, z)
-    .applyAxisAngle(WORLD_RIGHT, THREE.MathUtils.degToRad(tilt))
-    .applyAxisAngle(WORLD_UP, THREE.MathUtils.degToRad(scenePan))
+function applyPanelOrientation(vector, tilt, roll, scenePan) {
+  return vector.clone()
+    .applyAxisAngle(PANEL_LOCAL_LENGTH_AXIS, THREE.MathUtils.degToRad(roll))
+    .applyAxisAngle(PANEL_LOCAL_WIDTH_AXIS, THREE.MathUtils.degToRad(tilt))
+    .applyAxisAngle(WORLD_UP, THREE.MathUtils.degToRad(scenePan));
+}
+
+function getPanelWorldPoint(x, y, z, tilt, roll, scenePan) {
+  return applyPanelOrientation(new THREE.Vector3(x, y, z), tilt, roll, scenePan)
     .add(PANEL_PIVOT_OFFSET.clone());
 }
 
-function getPanelState(panel, sun) {
+function getPanelAzimuth(panel) {
+  // The MPU6050 gives pitch/roll, not a reliable yaw; use measured heading only when telemetry has it.
+  return normalizeDegrees(
+    panel?.azimuth_deg ?? panel?.heading_deg ?? panel?.yaw_deg,
+    PANEL_BASE_AZIMUTH,
+  );
+}
+
+function getPanelState(panel, sun, guide) {
   const tracking = supportsTracking(panel?.tracking_mode);
   const measuredTilt = THREE.MathUtils.clamp(
     panel?.angle_measured_deg ?? panel?.angle_target_deg ?? 54,
-    0,
-    78,
+    -25,
+    88,
+  );
+  const measuredRoll = THREE.MathUtils.clamp(
+    panel?.roll_deg ?? 0,
+    -45,
+    45,
   );
   const optimalTilt = THREE.MathUtils.clamp(
-    panel?.angle_target_deg ?? measuredTilt,
+    guide?.targetTilt ?? panel?.angle_target_deg ?? measuredTilt,
     0,
-    78,
+    88,
   );
-  const angleError = Math.abs(panel?.angle_error_deg ?? (optimalTilt - measuredTilt));
-  const tilt = angleError > 2 || panel?.servo_active
-    ? optimalTilt
-    : measuredTilt;
-  const azimuth = tracking
-    ? THREE.MathUtils.clamp(sun.azimuth, 110, 250)
-    : PANEL_BASE_AZIMUTH;
+  const angleError = Math.abs(optimalTilt - measuredTilt);
+  const tilt = measuredTilt;
+  const roll = measuredRoll;
+  const azimuth = getPanelAzimuth(panel);
   const scenePan = toSceneAzimuth(azimuth);
-  const normal = new THREE.Vector3(0, 1, 0)
-    .applyAxisAngle(WORLD_RIGHT, THREE.MathUtils.degToRad(tilt))
-    .applyAxisAngle(WORLD_UP, THREE.MathUtils.degToRad(scenePan))
-    .normalize();
+  const guideAzimuth = guide?.solarValid ? guide.targetAzimuth : azimuth;
+  const guideScenePan = toSceneAzimuth(guideAzimuth);
+  const guideTilt = optimalTilt;
+  const guideRoll = 0;
+  const normal = applyPanelOrientation(new THREE.Vector3(0, 1, 0), tilt, roll, scenePan).normalize();
+  const targetNormal = applyPanelOrientation(new THREE.Vector3(0, 1, 0), guideTilt, guideRoll, guideScenePan).normalize();
   const pivot = PANEL_PIVOT_OFFSET.clone();
   const sunDirection = sun.position.clone().sub(PANEL_PIVOT_OFFSET).normalize();
   const incidenceAngle = THREE.MathUtils.radToDeg(normal.angleTo(sunDirection));
   const incidenceFactor = THREE.MathUtils.clamp(normal.dot(sunDirection), 0, 1);
   const normalEnd = pivot.clone().add(normal.clone().multiplyScalar(2.05));
+  const targetNormalEnd = pivot.clone().add(targetNormal.clone().multiplyScalar(1.8));
   const sunVectorEnd = pivot.clone().add(sunDirection.clone().multiplyScalar(2.45));
   const arcPoints = Array.from({ length: 16 }, (_, index) => {
     const progress = index / 15;
@@ -142,22 +255,45 @@ function getPanelState(panel, sun) {
   });
 
   const targetPoints = [
-    getPanelWorldPoint(-1.04, 0.105, 1.02, tilt, scenePan),
-    getPanelWorldPoint(0, 0.115, 0.05, tilt, scenePan),
-    getPanelWorldPoint(1.04, 0.105, -0.98, tilt, scenePan),
+    getPanelWorldPoint(-1.04, 0.105, 1.02, tilt, roll, scenePan),
+    getPanelWorldPoint(0, 0.115, 0.05, tilt, roll, scenePan),
+    getPanelWorldPoint(1.04, 0.105, -0.98, tilt, roll, scenePan),
+  ];
+  const guideOutlinePoints = [
+    getPanelWorldPoint(-1.68, 0.16, -2.12, guideTilt, guideRoll, guideScenePan),
+    getPanelWorldPoint(1.68, 0.16, -2.12, guideTilt, guideRoll, guideScenePan),
+    getPanelWorldPoint(1.68, 0.16, 2.12, guideTilt, guideRoll, guideScenePan),
+    getPanelWorldPoint(-1.68, 0.16, 2.12, guideTilt, guideRoll, guideScenePan),
+    getPanelWorldPoint(-1.68, 0.16, -2.12, guideTilt, guideRoll, guideScenePan),
+  ];
+  const actualOutlinePoints = [
+    getPanelWorldPoint(-1.68, 0.18, -2.12, tilt, roll, scenePan),
+    getPanelWorldPoint(1.68, 0.18, -2.12, tilt, roll, scenePan),
+    getPanelWorldPoint(1.68, 0.18, 2.12, tilt, roll, scenePan),
+    getPanelWorldPoint(-1.68, 0.18, 2.12, tilt, roll, scenePan),
+    getPanelWorldPoint(-1.68, 0.18, -2.12, tilt, roll, scenePan),
   ];
 
   return {
     tracking,
     tilt,
+    roll,
     measuredTilt,
+    measuredRoll,
     optimalTilt,
     angleError,
     azimuth,
     scenePan,
+    guideAzimuth,
+    guideScenePan,
+    guideTilt,
+    guideOutlinePoints,
+    actualOutlinePoints,
     pivot,
     normal,
+    targetNormal,
     normalEnd,
+    targetNormalEnd,
     sunDirection,
     sunVectorEnd,
     incidenceAngle,
@@ -168,8 +304,9 @@ function getPanelState(panel, sun) {
 }
 
 function getSolarState(data) {
-  const sun = getSunState(data?.simHour, data?.environment?.lux_bh1750);
-  const panel = getPanelState(data?.panel, sun);
+  const guide = buildSolarGeometryGuide(data);
+  const sun = getSunState(data?.simHour, data?.environment?.lux_bh1750, data?.solar);
+  const panel = getPanelState(data?.panel, sun, guide);
   const powerFactor = THREE.MathUtils.clamp((data?.electrical?.power_w || 0) / 42, 0, 1);
   const solarImpact = THREE.MathUtils.clamp(
     panel.incidenceFactor * 0.68 + sun.irradianceFactor * 0.22 + powerFactor * 0.1,
@@ -181,6 +318,7 @@ function getSolarState(data) {
     sun,
     panel,
     solarImpact,
+    guide,
   };
 }
 
@@ -223,22 +361,63 @@ function getIncidenceDescriptor(incidenceAngle, t) {
   return t('solar.reducedCapture');
 }
 
+function getAlignmentLocked(solarState) {
+  return Boolean(
+    solarState.guide?.solarValid &&
+    solarState.panel.angleError <= ALIGNMENT_TILT_TOLERANCE_DEG &&
+    solarState.panel.incidenceAngle <= ALIGNMENT_INCIDENCE_TOLERANCE_DEG,
+  );
+}
+
+function useMobileSolarView() {
+  const [mobileView, setMobileView] = useState(() => (
+    typeof window !== 'undefined' && window.matchMedia(MOBILE_VIEW_QUERY).matches
+  ));
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return undefined;
+    }
+
+    const media = window.matchMedia(MOBILE_VIEW_QUERY);
+    const handleChange = () => setMobileView(media.matches);
+
+    handleChange();
+    media.addEventListener('change', handleChange);
+
+    return () => media.removeEventListener('change', handleChange);
+  }, []);
+
+  return mobileView;
+}
+
 function CameraRig({ compact }) {
   const { camera } = useThree();
+  const basePosition = useMemo(() => (
+    compact
+      ? new THREE.Vector3(1.55, 3.55, 7.25)
+      : new THREE.Vector3(3.45, 5.15, 10.8)
+  ), [compact]);
+  const target = useMemo(() => (
+    compact ? new THREE.Vector3(0, -0.2, 0) : new THREE.Vector3(0, -0.55, 0)
+  ), [compact]);
+
+  useEffect(() => {
+    camera.position.copy(basePosition);
+    camera.lookAt(target);
+    camera.updateProjectionMatrix();
+  }, [basePosition, camera, target]);
 
   useFrame((state) => {
     const time = state.clock.elapsedTime;
-    const basePosition = compact
-      ? new THREE.Vector3(4.7, 2.95, 6.1)
-      : new THREE.Vector3(5.95, 3.45, 7.05);
     const animatedPosition = new THREE.Vector3(
-      basePosition.x + Math.sin(time * 0.22) * 0.16,
-      basePosition.y + Math.cos(time * 0.32) * 0.08,
-      basePosition.z + Math.sin(time * 0.18) * 0.12,
+      basePosition.x + Math.sin(time * 0.16) * 0.08,
+      basePosition.y + Math.cos(time * 0.2) * 0.04,
+      basePosition.z + Math.sin(time * 0.14) * 0.06,
     );
 
-    camera.position.lerp(animatedPosition, 0.04);
-    camera.lookAt(0, -0.55, 0);
+    camera.position.lerp(animatedPosition, 0.055);
+    camera.lookAt(target);
   });
 
   return null;
@@ -559,83 +738,142 @@ function AngleGuide({ pivot, normalEnd, sunVectorEnd, arcPoints, incidenceAngle,
   );
 }
 
-function TrackerModel({ targetTilt, targetPan, solarImpact, castShadow = true }) {
+function TargetPanelGuide({ pivot, outlinePoints, normalEnd, label }) {
+  return (
+    <group>
+      <Line
+        points={outlinePoints.map((point) => point.toArray())}
+        color="#FBBF24"
+        transparent
+        opacity={0.72}
+        lineWidth={1.1}
+        depthWrite={false}
+      />
+      <Line
+        points={[pivot.toArray(), normalEnd.toArray()]}
+        color="#FBBF24"
+        transparent
+        opacity={0.48}
+        lineWidth={0.9}
+        depthWrite={false}
+      />
+      <mesh position={normalEnd.toArray()}>
+        <sphereGeometry args={[0.045, 12, 12]} />
+        <meshBasicMaterial color="#FBBF24" transparent opacity={0.84} />
+      </mesh>
+      <Html position={normalEnd.clone().add(new THREE.Vector3(0, 0.2, 0)).toArray()} center>
+        <div className="pointer-events-none rounded-full border border-amber-300/20 bg-black/36 px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.2em] text-amber-100 shadow-[0_8px_24px_rgba(0,0,0,0.22)]">
+          {label}
+        </div>
+      </Html>
+    </group>
+  );
+}
+
+function ActualPanelGuide({ outlinePoints, normalEnd }) {
+  return (
+    <group>
+      <Line
+        points={outlinePoints.map((point) => point.toArray())}
+        color="#7DD3FC"
+        transparent
+        opacity={1}
+        lineWidth={2.6}
+        depthWrite={false}
+        depthTest={false}
+      />
+      <mesh position={normalEnd.toArray()}>
+        <sphereGeometry args={[0.052, 12, 12]} />
+        <meshBasicMaterial color="#67E8F9" transparent opacity={1} depthTest={false} fog={false} />
+      </mesh>
+    </group>
+  );
+}
+
+function TrackerModel({ targetTilt, targetRoll, targetPan, solarImpact, castShadow = true }) {
   const heroRef = useRef();
-  const pivotRef = useRef();
-  const panelRef = useRef();
+  const azimuthRef = useRef();
+  const tiltFrameRef = useRef();
+  const rollFrameRef = useRef();
   const settleUntilRef = useRef(0);
+  const panelTexture = useMemo(() => createPanelFaceTexture(), []);
   const frameColor = useMemo(() => {
-    const color = new THREE.Color('#9CA8B6');
-    return color.lerp(new THREE.Color('#DEE6EF'), solarImpact * 0.45);
-  }, [solarImpact]);
-  const cellColor = useMemo(() => {
-    const color = new THREE.Color('#071321');
-    return color.lerp(new THREE.Color('#164D83'), solarImpact * 0.92);
-  }, [solarImpact]);
-  const cellEmissive = useMemo(() => {
-    const color = new THREE.Color('#08111C');
-    return color.lerp(new THREE.Color('#245A9B'), solarImpact * 0.62);
-  }, [solarImpact]);
-  const coreSurfaceColor = useMemo(() => {
-    const color = new THREE.Color('#09131E');
-    return color.lerp(new THREE.Color('#12304D'), solarImpact * 0.72);
+    const color = new THREE.Color('#8796A8');
+    return color.lerp(new THREE.Color('#DCE6F2'), solarImpact * 0.35);
   }, [solarImpact]);
   const glassTint = useMemo(() => {
-    const color = new THREE.Color('#CFE6FF');
-    return color.lerp(new THREE.Color('#FFFFFF'), solarImpact * 0.5);
+    const color = new THREE.Color('#B9E4FF');
+    return color.lerp(new THREE.Color('#FFF5D6'), solarImpact * 0.46);
   }, [solarImpact]);
-  const heatColor = useMemo(() => {
-    const color = new THREE.Color('#60A5FA');
-    return color.lerp(new THREE.Color('#FBBF24'), solarImpact);
-  }, [solarImpact]);
-  const glassOpacity = 0.05 + solarImpact * 0.14;
-  const highlightOpacity = 0.04 + solarImpact * 0.24;
-  const streakOpacity = 0.02 + solarImpact * 0.2;
+  const glassOpacity = 0.08 + solarImpact * 0.1;
+  const highlightOpacity = 0.08 + solarImpact * 0.18;
+  const frameRails = [
+    { key: 'left', position: [-1.66, 0.205, 0], args: [0.12, 0.09, 4.2] },
+    { key: 'right', position: [1.66, 0.205, 0], args: [0.12, 0.09, 4.2] },
+    { key: 'top', position: [0, 0.21, -2.12], args: [3.34, 0.1, 0.12] },
+    { key: 'bottom', position: [0, 0.21, 2.12], args: [3.34, 0.1, 0.12] },
+  ];
+
+  useEffect(() => () => {
+    panelTexture?.dispose();
+  }, [panelTexture]);
 
   useFrame((state, delta) => {
-    if (!heroRef.current || !pivotRef.current || !panelRef.current) {
+    if (!heroRef.current || !azimuthRef.current || !tiltFrameRef.current || !rollFrameRef.current) {
       return;
     }
 
     const radTilt = THREE.MathUtils.degToRad(targetTilt);
+    const radRoll = THREE.MathUtils.degToRad(targetRoll);
     const radPan = THREE.MathUtils.degToRad(targetPan);
     const time = state.clock.elapsedTime;
-    const remainingPan = Math.abs(pivotRef.current.rotation.y - radPan);
-    const remainingTilt = Math.abs(panelRef.current.rotation.x - radTilt);
-    const remainingMotion = Math.max(remainingPan, remainingTilt);
+    const remainingPan = Math.abs(Math.atan2(
+      Math.sin(radPan - azimuthRef.current.rotation.y),
+      Math.cos(radPan - azimuthRef.current.rotation.y),
+    ));
+    const remainingTilt = Math.abs(tiltFrameRef.current.rotation.x - radTilt);
+    const remainingRoll = Math.abs(rollFrameRef.current.rotation.z - radRoll);
+    const remainingMotion = Math.max(remainingPan, remainingTilt, remainingRoll);
 
     if (remainingMotion > 0.018) {
       settleUntilRef.current = time + 0.18;
     }
 
     const easing = remainingMotion > 0.12
-      ? 3.8
+      ? 4.7
       : time < settleUntilRef.current
-        ? 1.55
-        : 2.35;
+        ? 2.3
+        : 3.4;
 
     heroRef.current.position.y = THREE.MathUtils.lerp(
       heroRef.current.position.y,
-      -0.35 + Math.sin(time * 0.55) * 0.04,
-      delta * 2,
+      -0.18,
+      delta * 3,
     );
 
     heroRef.current.rotation.z = THREE.MathUtils.lerp(
       heroRef.current.rotation.z,
-      Math.sin(time * 0.38) * 0.018,
-      delta * 1.2,
+      0,
+      delta * 2.4,
     );
 
-    pivotRef.current.rotation.y = THREE.MathUtils.damp(
-      pivotRef.current.rotation.y,
+    azimuthRef.current.rotation.y = dampAngle(
+      azimuthRef.current.rotation.y,
       radPan,
       easing,
       delta,
     );
 
-    panelRef.current.rotation.x = THREE.MathUtils.damp(
-      panelRef.current.rotation.x,
+    tiltFrameRef.current.rotation.x = THREE.MathUtils.damp(
+      tiltFrameRef.current.rotation.x,
       radTilt,
+      easing,
+      delta,
+    );
+
+    rollFrameRef.current.rotation.z = THREE.MathUtils.damp(
+      rollFrameRef.current.rotation.z,
+      radRoll,
       easing,
       delta,
     );
@@ -643,177 +881,151 @@ function TrackerModel({ targetTilt, targetPan, solarImpact, castShadow = true })
 
   return (
     <group ref={heroRef}>
-      <group ref={pivotRef}>
-        <mesh position={[0, -3.1, 0]} castShadow={castShadow} receiveShadow={castShadow}>
-          <cylinderGeometry args={[0.88, 1.02, 0.18, 36]} />
-          <meshStandardMaterial color="#2D3748" metalness={0.4} roughness={0.72} />
+      <group ref={azimuthRef}>
+        <mesh position={[0, -3.12, 0]} castShadow={castShadow} receiveShadow={castShadow}>
+          <cylinderGeometry args={[0.95, 1.18, 0.24, 44]} />
+          <meshStandardMaterial color="#1E293B" metalness={0.36} roughness={0.76} />
         </mesh>
 
-        <mesh position={[0, -1.65, 0]} castShadow={castShadow} receiveShadow={castShadow}>
-          <cylinderGeometry args={[0.16, 0.24, 3.05, 24]} />
-          <meshStandardMaterial color="#64748B" metalness={0.52} roughness={0.48} />
+        <mesh position={[0, -1.72, 0]} castShadow={castShadow} receiveShadow={castShadow}>
+          <cylinderGeometry args={[0.17, 0.25, 2.86, 28]} />
+          <meshStandardMaterial color="#64748B" metalness={0.5} roughness={0.5} />
         </mesh>
 
-        <mesh position={[-0.34, -2.25, 0]} rotation={[0, 0, 0.34]} castShadow={castShadow}>
-          <boxGeometry args={[0.08, 1.35, 0.08]} />
+        <mesh position={[-0.58, -0.98, 0]} castShadow={castShadow} receiveShadow={castShadow}>
+          <boxGeometry args={[0.13, 2.4, 0.16]} />
+          <meshStandardMaterial color="#526175" metalness={0.5} roughness={0.48} />
+        </mesh>
+
+        <mesh position={[0.58, -0.98, 0]} castShadow={castShadow} receiveShadow={castShadow}>
+          <boxGeometry args={[0.13, 2.4, 0.16]} />
+          <meshStandardMaterial color="#526175" metalness={0.5} roughness={0.48} />
+        </mesh>
+
+        <mesh position={[-0.36, -2.25, 0]} rotation={[0, 0, 0.36]} castShadow={castShadow}>
+          <boxGeometry args={[0.09, 1.42, 0.1]} />
           <meshStandardMaterial color="#475569" metalness={0.46} roughness={0.55} />
         </mesh>
 
-        <mesh position={[0.34, -2.25, 0]} rotation={[0, 0, -0.34]} castShadow={castShadow}>
-          <boxGeometry args={[0.08, 1.35, 0.08]} />
+        <mesh position={[0.36, -2.25, 0]} rotation={[0, 0, -0.36]} castShadow={castShadow}>
+          <boxGeometry args={[0.09, 1.42, 0.1]} />
           <meshStandardMaterial color="#475569" metalness={0.46} roughness={0.55} />
         </mesh>
 
-        <mesh position={[0, -0.18, 0]} rotation={[0, 0, Math.PI / 2]} castShadow={castShadow}>
-          <cylinderGeometry args={[0.24, 0.24, 0.92, 24]} />
-          <meshStandardMaterial color="#94A3B8" metalness={0.55} roughness={0.3} />
-        </mesh>
-
-        <group ref={panelRef} position={[0, 0.22, 0]}>
-          <mesh position={[0, -0.32, 0]} castShadow={castShadow} receiveShadow={castShadow}>
-            <boxGeometry args={[0.24, 0.34, 0.24]} />
-            <meshStandardMaterial color="#64748B" metalness={0.5} roughness={0.44} />
-          </mesh>
-
-          <mesh position={[-0.96, -0.14, 0]} castShadow={castShadow} receiveShadow={castShadow}>
-            <boxGeometry args={[0.08, 0.18, 3.58]} />
-            <meshPhysicalMaterial
-              color={frameColor}
-              metalness={0.9}
-              roughness={0.14}
-              clearcoat={1}
-              clearcoatRoughness={0.04}
-            />
-          </mesh>
-
-          <mesh position={[0.96, -0.14, 0]} castShadow={castShadow} receiveShadow={castShadow}>
-            <boxGeometry args={[0.08, 0.18, 3.58]} />
-            <meshPhysicalMaterial
-              color={frameColor}
-              metalness={0.9}
-              roughness={0.14}
-              clearcoat={1}
-              clearcoatRoughness={0.04}
-            />
-          </mesh>
-
-          <mesh castShadow={castShadow} receiveShadow={castShadow}>
-            <boxGeometry args={[3.26, 0.14, 4.18]} />
-            <meshPhysicalMaterial
-              color={frameColor}
-              metalness={0.94}
-              roughness={0.12}
-              clearcoat={1}
-              clearcoatRoughness={0.04}
-            />
-          </mesh>
-
-          <mesh position={[0, 0.032, 0]} receiveShadow={castShadow}>
-            <boxGeometry args={[2.98, 0.06, 3.92]} />
-            <meshPhysicalMaterial
-              color={coreSurfaceColor}
-              emissive={cellEmissive}
-              emissiveIntensity={0.04 + solarImpact * 0.12}
-              metalness={0.52}
-              roughness={0.36 - solarImpact * 0.18}
-              clearcoat={1}
-              clearcoatRoughness={0.02}
-            />
-          </mesh>
-
-          {PANEL_CELL_POSITIONS.map((cell) => (
-            <mesh key={cell.key} position={[cell.x, 0.058, cell.z]}>
-              <boxGeometry args={[PANEL_CELL_WIDTH, 0.013, PANEL_CELL_HEIGHT]} />
-              <meshPhysicalMaterial
-                color={cellColor}
-                emissive={cellEmissive}
-                emissiveIntensity={0.06 + solarImpact * 0.16}
-                metalness={0.74}
-                roughness={0.2 - solarImpact * 0.08}
-                clearcoat={1}
-                clearcoatRoughness={0.02}
-              />
+        <group ref={tiltFrameRef} position={[0, 0.22, 0]}>
+          <group ref={rollFrameRef}>
+            <mesh position={[0, -0.24, 1.82]} rotation={[0, 0, Math.PI / 2]} castShadow={castShadow} receiveShadow={castShadow}>
+              <cylinderGeometry args={[0.18, 0.18, 1.24, 32]} />
+              <meshStandardMaterial color="#94A3B8" metalness={0.55} roughness={0.3} />
             </mesh>
-          ))}
 
-          <mesh position={[0, 0.078, 0]}>
-            <boxGeometry args={[2.98, 0.01, 3.92]} />
-            <meshPhysicalMaterial
-              color={glassTint}
-              transparent
-              opacity={glassOpacity}
-              roughness={0.015}
-              metalness={0}
-              clearcoat={1}
-              clearcoatRoughness={0.008}
-              transmission={0.28 + solarImpact * 0.18}
-              reflectivity={0.92}
-              ior={1.45}
-            />
-          </mesh>
+            <mesh position={[0, -0.24, 1.82]} castShadow={castShadow} receiveShadow={castShadow}>
+              <boxGeometry args={[0.36, 0.4, 0.36]} />
+              <meshStandardMaterial color="#607086" metalness={0.5} roughness={0.44} />
+            </mesh>
 
-          <mesh position={[-0.32, 0.09, -0.18]} rotation={[0.02, 0.18, 0.02]}>
-            <planeGeometry args={[2.26, 0.62]} />
-            <meshBasicMaterial
-              color="#FFF3CF"
-              transparent
-              opacity={highlightOpacity}
-              blending={THREE.AdditiveBlending}
-              depthWrite={false}
-            />
-          </mesh>
+            <mesh position={[-0.47, -0.42, 1.55]} rotation={[0, 0, 0.18]} castShadow={castShadow}>
+              <boxGeometry args={[0.1, 0.98, 0.14]} />
+              <meshStandardMaterial color="#64748B" metalness={0.48} roughness={0.48} />
+            </mesh>
 
-          <mesh position={[0.48, 0.094, 0.18]} rotation={[0.01, -0.14, 0.04]}>
-            <planeGeometry args={[1.56, 0.14]} />
-            <meshBasicMaterial
-              color="#FFFFFF"
-              transparent
-              opacity={streakOpacity}
-              blending={THREE.AdditiveBlending}
-              depthWrite={false}
-            />
-          </mesh>
+            <mesh position={[0.47, -0.42, 1.55]} rotation={[0, 0, -0.18]} castShadow={castShadow}>
+              <boxGeometry args={[0.1, 0.98, 0.14]} />
+              <meshStandardMaterial color="#64748B" metalness={0.48} roughness={0.48} />
+            </mesh>
 
-          <mesh position={[0.22, 0.083, 0.18]} rotation={[-Math.PI / 2, 0.22, 0]}>
-            <planeGeometry args={[2.36, 1.04]} />
-            <meshBasicMaterial
-              color={heatColor}
-              transparent
-              opacity={0.04 + solarImpact * 0.18}
-              blending={THREE.AdditiveBlending}
-              depthWrite={false}
-            />
-          </mesh>
-
-          {FRAME_RAIL_X.map((x) => (
-            <mesh key={`rail-x-${x}`} position={[x, 0.07, 0]} receiveShadow={castShadow}>
-              <boxGeometry args={[0.05, 0.018, 3.92]} />
+            <mesh position={[0, -0.055, 0]} castShadow={castShadow} receiveShadow={castShadow}>
+              <boxGeometry args={[3.34, 0.18, 4.24]} />
               <meshPhysicalMaterial
                 color={frameColor}
-                emissive="#6EA6C8"
-                emissiveIntensity={0.03}
-                metalness={0.86}
-                roughness={0.14}
+                metalness={0.82}
+                roughness={0.2}
                 clearcoat={1}
-                clearcoatRoughness={0.03}
+                clearcoatRoughness={0.08}
               />
             </mesh>
-          ))}
 
-          {FRAME_RAIL_Z.map((z) => (
-            <mesh key={`rail-z-${z}`} position={[0, 0.07, z]} receiveShadow={castShadow}>
-              <boxGeometry args={[2.96, 0.018, 0.05]} />
-              <meshPhysicalMaterial
-                color={frameColor}
-                emissive="#6EA6C8"
-                emissiveIntensity={0.02}
-                metalness={0.84}
-                roughness={0.14}
-                clearcoat={1}
-                clearcoatRoughness={0.03}
+            <mesh position={[0, 0.06, 0]} castShadow={castShadow} receiveShadow={castShadow}>
+              <boxGeometry args={[3.04, 0.045, 3.94]} />
+              <meshBasicMaterial
+                map={panelTexture}
+                color="#B8F2FF"
+                fog={false}
+                toneMapped={false}
               />
             </mesh>
-          ))}
+
+            <mesh position={[0, 0.172, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+              <planeGeometry args={[3.02, 3.92]} />
+              <meshBasicMaterial
+                map={panelTexture}
+                color="#D7FBFF"
+                side={THREE.DoubleSide}
+                fog={false}
+                toneMapped={false}
+              />
+            </mesh>
+
+            {frameRails.map((rail) => (
+              <mesh key={rail.key} position={rail.position} castShadow={castShadow} receiveShadow={castShadow}>
+                <boxGeometry args={rail.args} />
+                <meshBasicMaterial
+                  color="#D8E4F2"
+                  fog={false}
+                  toneMapped={false}
+                />
+              </mesh>
+            ))}
+
+            <mesh position={[0, 0.095, 0]}>
+              <boxGeometry args={[3.05, 0.012, 3.95]} />
+              <meshPhysicalMaterial
+                color={glassTint}
+                transparent
+                opacity={glassOpacity}
+                roughness={0.015}
+                metalness={0}
+                clearcoat={1}
+                clearcoatRoughness={0.008}
+                reflectivity={0.92}
+                ior={1.45}
+                depthWrite={false}
+              />
+            </mesh>
+
+            <mesh position={[0, 0.122, 0]}>
+              <boxGeometry args={[3.02, 0.01, 3.92]} />
+              <meshBasicMaterial
+                color="#38BDF8"
+                transparent
+                opacity={0.08 + solarImpact * 0.18}
+                blending={THREE.AdditiveBlending}
+                depthWrite={false}
+              />
+            </mesh>
+
+            <mesh position={[-0.44, 0.112, -0.26]} rotation={[-Math.PI / 2, 0, 0.2]}>
+              <planeGeometry args={[2.24, 0.42]} />
+              <meshBasicMaterial
+                color="#FFF3CF"
+                transparent
+                opacity={highlightOpacity}
+                blending={THREE.AdditiveBlending}
+                depthWrite={false}
+              />
+            </mesh>
+
+            <mesh position={[0, 0.14, 0]} rotation={[-Math.PI / 2, 0, 0]}>
+              <ringGeometry args={[2.32, 2.37, 72]} />
+              <meshBasicMaterial
+                color="#7DD3FC"
+                transparent
+                opacity={0.14 + solarImpact * 0.08}
+                side={THREE.DoubleSide}
+                depthWrite={false}
+              />
+            </mesh>
+          </group>
         </group>
 
         <mesh position={[0, -3.2, 0]} castShadow={castShadow} receiveShadow={castShadow}>
@@ -853,30 +1065,44 @@ function TrackerModel({ targetTilt, targetPan, solarImpact, castShadow = true })
   );
 }
 
-function Scene({ solarState, compact, geometryLabel, azimuthLabel }) {
+function Scene({ solarState, compact, azimuthLabel, targetGuideLabel }) {
   const { sun, panel, solarImpact } = solarState;
 
   return (
     <>
       <color attach="background" args={['#08111D']} />
-      <fog attach="fog" args={['#08111D', 8, 16]} />
-      <ambientLight intensity={0.48} color="#E8EEF8" />
-      <hemisphereLight intensity={0.96} color="#F4FAFF" groundColor="#07101C" />
+      <fog attach="fog" args={['#08111D', 16, 30]} />
+      <ambientLight intensity={0.68} color="#E8EEF8" />
+      <hemisphereLight intensity={1.18} color="#F4FAFF" groundColor="#07101C" />
       <SunLightRig sun={sun} solarImpact={solarImpact} />
-      <directionalLight position={[-4.8, 2.6, 6.4]} intensity={0.92} color="#8FD8FF" />
+      <directionalLight position={[-4.8, 3.4, 6.4]} intensity={1.12} color="#8FD8FF" />
       <pointLight position={[-5, 0.9, -4]} intensity={1.05} distance={14} decay={2} color="#38BDF8" />
 
       <CameraRig compact={compact} />
       <StageAtmosphere solarImpact={solarImpact} />
       <SunAccent position={sun.position} solarImpact={solarImpact} />
-      <IncidenceRays start={sun.position} targets={panel.targetPoints} intensity={solarImpact} />
-      <AngleGuide
-        pivot={panel.pivot}
+      {!compact ? (
+        <>
+          <IncidenceRays start={sun.position} targets={panel.targetPoints} intensity={solarImpact} />
+          <AngleGuide
+            pivot={panel.pivot}
+            normalEnd={panel.normalEnd}
+            sunVectorEnd={panel.sunVectorEnd}
+            arcPoints={panel.arcPoints}
+            incidenceAngle={panel.incidenceAngle}
+            solarImpact={solarImpact}
+          />
+          <TargetPanelGuide
+            pivot={panel.pivot}
+            outlinePoints={panel.guideOutlinePoints}
+            normalEnd={panel.targetNormalEnd}
+            label={targetGuideLabel}
+          />
+        </>
+      ) : null}
+      <ActualPanelGuide
+        outlinePoints={panel.actualOutlinePoints}
         normalEnd={panel.normalEnd}
-        sunVectorEnd={panel.sunVectorEnd}
-        arcPoints={panel.arcPoints}
-        incidenceAngle={panel.incidenceAngle}
-        solarImpact={solarImpact}
       />
 
       <mesh receiveShadow position={[0, -3.02, 0]} rotation={[-Math.PI / 2, 0, 0]}>
@@ -884,14 +1110,16 @@ function Scene({ solarState, compact, geometryLabel, azimuthLabel }) {
         <shadowMaterial transparent opacity={0.3 + solarImpact * 0.08} />
       </mesh>
 
-      <TrackerModel targetTilt={panel.tilt} targetPan={panel.scenePan} solarImpact={solarImpact} />
-      <CompassDial panelAzimuth={panel.azimuth} sunAzimuth={sun.azimuth} label={azimuthLabel} />
+      <TrackerModel
+        targetTilt={panel.tilt}
+        targetRoll={panel.roll}
+        targetPan={panel.scenePan}
+        solarImpact={solarImpact}
+      />
+      {!compact ? (
+        <CompassDial panelAzimuth={panel.guideAzimuth} sunAzimuth={sun.azimuth} label={azimuthLabel} />
+      ) : null}
 
-      <Html position={[0, 2.7, 0]} center>
-        <div className="pointer-events-none rounded-full border border-white/10 bg-black/20 px-3 py-1 text-[11px] font-medium uppercase tracking-[0.28em] text-white/85 shadow-[0_0_30px_rgba(255,255,255,0.08)]">
-          {geometryLabel}
-        </div>
-      </Html>
     </>
   );
 }
@@ -925,29 +1153,134 @@ function ContextLostFallback({ onRetry }) {
 export default function SolarPanelCanvas({ compact = false }) {
   const { locale, t } = useLocale();
   const telemetry = useHelioStore((state) => state.data);
+  const mobileView = useMobileSolarView();
   const cleanupRef = useRef(() => {});
+  const audioContextRef = useRef(null);
+  const previousAlignedRef = useRef(false);
+  const lastToneAtRef = useRef(0);
   const [contextLost, setContextLost] = useState(false);
   const [canvasKey, setCanvasKey] = useState(0);
+  const [alignmentSoundEnabled, setAlignmentSoundEnabled] = useState(false);
   const solarState = useMemo(() => getSolarState(telemetry), [telemetry]);
+  const guide = solarState.guide;
   const panelData = telemetry.panel;
+  const alignmentLocked = useMemo(() => getAlignmentLocked(solarState), [solarState]);
   const motionState = useMemo(() => getPanelMotionState(panelData, t), [panelData, t]);
   const mountLabel = useMemo(() => getMountLabel(panelData.tracking_mode, t), [panelData.tracking_mode, t]);
   const incidenceDescriptor = useMemo(
     () => getIncidenceDescriptor(solarState.panel.incidenceAngle, t),
     [solarState.panel.incidenceAngle, t],
   );
+  const compactView = compact || mobileView;
+  const solarImpactPercent = Math.round(solarState.solarImpact * 100);
 
-  useEffect(() => () => cleanupRef.current(), []);
+  const playAlignmentTone = useCallback((force = false) => {
+    if (!force && !alignmentSoundEnabled) {
+      return;
+    }
 
-  const handleCreated = ({ gl }) => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+
+    if (!AudioContextClass) {
+      return;
+    }
+
+    if (!audioContextRef.current) {
+      audioContextRef.current = new AudioContextClass();
+    }
+
+    const audioContext = audioContextRef.current;
+
+    if (audioContext.state === 'suspended') {
+      audioContext.resume();
+    }
+
+    const now = audioContext.currentTime;
+    const gain = audioContext.createGain();
+    const oscillator = audioContext.createOscillator();
+
+    oscillator.type = 'sine';
+    oscillator.frequency.setValueAtTime(740, now);
+    oscillator.frequency.exponentialRampToValueAtTime(980, now + 0.12);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.075, now + 0.018);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.24);
+    oscillator.connect(gain).connect(audioContext.destination);
+    oscillator.start(now);
+    oscillator.stop(now + 0.26);
+  }, [alignmentSoundEnabled]);
+
+  useEffect(() => () => {
+    cleanupRef.current();
+    audioContextRef.current?.close?.();
+  }, []);
+
+  useEffect(() => {
+    const wasAligned = previousAlignedRef.current;
+    previousAlignedRef.current = alignmentLocked;
+
+    if (!alignmentSoundEnabled || !alignmentLocked || wasAligned) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - lastToneAtRef.current < 2500) {
+      return;
+    }
+
+    lastToneAtRef.current = now;
+    playAlignmentTone(true);
+  }, [alignmentLocked, alignmentSoundEnabled, playAlignmentTone]);
+
+  const handleCreated = ({ gl, camera }) => {
     const canvas = gl.domElement;
+    const wrapper = canvas.parentElement;
 
-    gl.setPixelRatio(1);
+    Object.assign(canvas.style, {
+      position: 'absolute',
+      inset: '0',
+      width: '100%',
+      height: '100%',
+      display: 'block',
+    });
+
+    if (wrapper) {
+      Object.assign(wrapper.style, {
+        position: 'absolute',
+        inset: '0',
+        width: '100%',
+        height: '100%',
+      });
+    }
+
+    const pixelRatio = typeof window === 'undefined'
+      ? 1
+      : Math.min(window.devicePixelRatio || 1, compactView ? 1.15 : 1.45);
+
+    gl.setPixelRatio(pixelRatio);
     gl.toneMapping = THREE.ACESFilmicToneMapping;
-    gl.toneMappingExposure = compact ? 1 : 1.08;
+    gl.toneMappingExposure = compactView ? 1.16 : 1.08;
     gl.outputColorSpace = THREE.SRGBColorSpace;
     gl.shadowMap.enabled = true;
     gl.shadowMap.type = THREE.PCFSoftShadowMap;
+
+    const resizeCanvas = () => {
+      const bounds = wrapper?.parentElement?.getBoundingClientRect();
+      if (!bounds?.width || !bounds?.height) {
+        return;
+      }
+
+      gl.setSize(bounds.width, bounds.height, false);
+
+      if ('aspect' in camera) {
+        camera.aspect = bounds.width / bounds.height;
+        camera.updateProjectionMatrix();
+      }
+    };
 
     const handleContextLost = (event) => {
       event.preventDefault();
@@ -960,10 +1293,14 @@ export default function SolarPanelCanvas({ compact = false }) {
 
     canvas.addEventListener('webglcontextlost', handleContextLost, false);
     canvas.addEventListener('webglcontextrestored', handleContextRestored, false);
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+    window.requestAnimationFrame(resizeCanvas);
 
     cleanupRef.current = () => {
       canvas.removeEventListener('webglcontextlost', handleContextLost, false);
       canvas.removeEventListener('webglcontextrestored', handleContextRestored, false);
+      window.removeEventListener('resize', resizeCanvas);
     };
   };
 
@@ -973,8 +1310,20 @@ export default function SolarPanelCanvas({ compact = false }) {
     setCanvasKey((value) => value + 1);
   };
 
+  const handleToggleSound = () => {
+    const nextEnabled = !alignmentSoundEnabled;
+    setAlignmentSoundEnabled(nextEnabled);
+
+    if (nextEnabled && alignmentLocked) {
+      lastToneAtRef.current = Date.now();
+      playAlignmentTone(true);
+    }
+  };
+
   return (
-    <div className={`relative w-full min-w-0 overflow-hidden rounded-3xl glass-panel group shadow-[0_0_30px_rgba(0,0,0,0.5)] transition-shadow hover:shadow-[0_0_40px_rgba(56,189,248,0.1)] ${compact ? 'h-[220px] sm:h-[280px]' : 'h-[320px] sm:h-[430px] lg:h-[620px]'}`}>
+    <div className={`heliosync-solar-canvas relative w-full min-w-0 overflow-hidden rounded-[22px] glass-panel group shadow-[0_0_30px_rgba(0,0,0,0.5)] transition-shadow hover:shadow-[0_0_40px_rgba(56,189,248,0.1)] sm:rounded-3xl ${
+      compactView ? 'h-[430px] sm:h-[300px]' : 'h-[360px] sm:h-[500px] lg:h-[660px]'
+    }`}>
       <div
         className="pointer-events-none absolute inset-0 z-[1]"
         style={{
@@ -990,41 +1339,83 @@ export default function SolarPanelCanvas({ compact = false }) {
         }}
       />
 
-      <div className="absolute left-3 top-3 z-10 max-w-[calc(100%-7rem)] rounded-full border border-white/10 bg-black/40 px-2.5 py-1 text-[10px] font-mono text-gray-300 shadow-md backdrop-blur sm:left-4 sm:top-4 sm:max-w-none sm:px-3 sm:text-xs">
-        {t('solar.tilt')} {formatLocaleNumber(locale, solarState.panel.measuredTilt, { maximumFractionDigits: 1, minimumFractionDigits: 1 })}° · {t('solar.azimuth')} {formatLocaleNumber(locale, solarState.panel.azimuth, { maximumFractionDigits: 0 })}°
+      <div className="absolute left-2.5 top-2.5 z-10 max-w-[calc(100%-6.5rem)] rounded-full border border-white/10 bg-black/44 px-2.5 py-1 text-[9px] font-mono text-gray-300 shadow-md backdrop-blur sm:left-4 sm:top-4 sm:max-w-none sm:px-3 sm:text-xs">
+        {t('solar.tilt')} {formatLocaleNumber(locale, solarState.panel.measuredTilt, { maximumFractionDigits: 1, minimumFractionDigits: 1 })}° · {t('solar.roll')} {formatLocaleNumber(locale, solarState.panel.measuredRoll, { maximumFractionDigits: 1, minimumFractionDigits: 1 })}°
         {Math.abs(panelData.angle_error_deg) > 0.5 && (
           <span className="ml-2 hidden text-red-400 sm:inline">{t('solar.error')}: {formatLocaleNumber(locale, panelData.angle_error_deg, { maximumFractionDigits: 1, minimumFractionDigits: 1 })}°</span>
         )}
       </div>
-      <div className="absolute right-3 top-3 z-10 max-w-[9rem] rounded-2xl border border-helium-500/18 bg-black/42 px-2.5 py-2 text-right shadow-[0_0_20px_rgba(56,189,248,0.12)] backdrop-blur sm:right-4 sm:top-4 sm:max-w-none sm:px-3">
-        <div className="text-[11px] font-semibold uppercase tracking-[0.24em] text-helium-300">{motionState}</div>
-        <div className="mt-1 text-[10px] uppercase tracking-[0.18em] text-slate-400">{mountLabel}</div>
+      <div className="absolute right-2.5 top-2.5 z-10 flex max-w-[8.5rem] flex-col items-end gap-2 sm:right-4 sm:top-4 sm:max-w-none">
+        <div className={`rounded-2xl border px-2.5 py-1.5 text-right shadow-[0_0_20px_rgba(56,189,248,0.12)] backdrop-blur sm:px-3 sm:py-2 ${
+          alignmentLocked
+            ? 'border-emerald-300/24 bg-emerald-400/12'
+            : 'border-helium-500/18 bg-black/42'
+        }`}>
+          <div className={`inline-flex items-center justify-end gap-1 text-[9px] font-semibold uppercase tracking-[0.16em] sm:gap-1.5 sm:text-[11px] sm:tracking-[0.2em] ${
+            alignmentLocked ? 'text-emerald-100' : 'text-helium-300'
+          }`}>
+            {alignmentLocked ? <CheckCircle2 className="h-3.5 w-3.5" /> : null}
+            <span>{motionState}</span>
+          </div>
+          <div className="mt-1 hidden text-[10px] uppercase tracking-[0.18em] text-slate-400 sm:block">{mountLabel}</div>
+        </div>
+        <button
+          type="button"
+          aria-pressed={alignmentSoundEnabled}
+          aria-label={alignmentSoundEnabled ? t('solar.disableAlignmentSound') : t('solar.enableAlignmentSound')}
+          onClick={handleToggleSound}
+          className={`inline-flex items-center justify-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[11px] font-medium transition backdrop-blur sm:px-3 sm:py-2 sm:text-xs ${
+            alignmentSoundEnabled
+              ? 'border-emerald-300/24 bg-emerald-400/12 text-emerald-100 hover:bg-emerald-400/18'
+              : 'border-white/10 bg-black/36 text-slate-300 hover:bg-white/10'
+          }`}
+        >
+          {alignmentSoundEnabled ? <Volume2 className="h-3.5 w-3.5" /> : <VolumeX className="h-3.5 w-3.5" />}
+          <span>{alignmentSoundEnabled ? t('solar.soundOn') : t('solar.soundOff')}</span>
+        </button>
       </div>
-      <div className="absolute bottom-3 left-3 right-3 z-10 rounded-2xl border border-white/10 bg-black/34 px-4 py-3 backdrop-blur-md shadow-[0_12px_30px_rgba(0,0,0,0.28)] sm:bottom-4 sm:left-1/2 sm:right-auto sm:min-w-[240px] sm:-translate-x-1/2">
+      <div className="absolute bottom-2.5 left-2.5 right-2.5 z-10 rounded-2xl border border-white/10 bg-black/38 px-3 py-2.5 backdrop-blur-md shadow-[0_12px_30px_rgba(0,0,0,0.28)] sm:bottom-4 sm:left-1/2 sm:right-auto sm:min-w-[240px] sm:-translate-x-1/2 sm:px-4 sm:py-3">
         <div className="text-[10px] font-semibold uppercase tracking-[0.26em] text-white/55">
           {t('solar.alignmentLabel')}
         </div>
-        <div className="mt-1 text-lg font-semibold text-white">
-          {Math.round(solarState.solarImpact * 100)}%
+        <div className="mt-1 text-base font-semibold text-white sm:text-lg">
+          {solarImpactPercent}%
         </div>
-        <div className="mt-1 text-xs text-slate-300/80">
+        <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/10 sm:mt-2">
+          <div
+            className={`h-full rounded-full transition-all duration-500 ${
+              alignmentLocked ? 'bg-emerald-300' : 'bg-helium-300'
+            }`}
+            style={{ width: `${solarImpactPercent}%` }}
+          />
+        </div>
+        <div className="mt-1 text-[11px] text-slate-300/80 sm:text-xs">
           {t('solar.sunLine', {
             azimuth: formatLocaleNumber(locale, solarState.sun.azimuth, { maximumFractionDigits: 0 }),
             delta: formatLocaleNumber(locale, solarState.panel.incidenceAngle, { maximumFractionDigits: 1, minimumFractionDigits: 1 }),
           })}
         </div>
+        {alignmentLocked ? (
+          <div className="mt-1 text-xs font-medium text-emerald-100/85">{t('solar.alignmentLocked')}</div>
+        ) : null}
       </div>
-      <div className="absolute bottom-[5.8rem] left-3 right-3 z-10 rounded-2xl border border-amber-400/14 bg-[linear-gradient(180deg,rgba(251,191,36,0.12),rgba(0,0,0,0.18))] px-4 py-3 backdrop-blur-md shadow-[0_12px_30px_rgba(0,0,0,0.24)] sm:bottom-4 sm:left-auto sm:right-4 sm:w-auto">
+      <div className="absolute bottom-[5.8rem] left-3 right-3 z-10 hidden rounded-2xl border border-amber-400/14 bg-[linear-gradient(180deg,rgba(251,191,36,0.12),rgba(0,0,0,0.18))] px-4 py-3 backdrop-blur-md shadow-[0_12px_30px_rgba(0,0,0,0.24)] sm:bottom-4 sm:left-auto sm:right-4 sm:block sm:w-auto">
         <div className="text-[10px] font-semibold uppercase tracking-[0.26em] text-amber-100/70">
           {t('solar.geometryLabel')}
         </div>
         <div className="mt-1 text-sm font-medium text-white">
+          {t('solar.targetGeometry', {
+            azimuth: formatLocaleNumber(locale, guide.targetAzimuth, { maximumFractionDigits: 0 }),
+            tilt: formatLocaleNumber(locale, guide.targetTilt, { maximumFractionDigits: 1, minimumFractionDigits: 1 }),
+          })}
+        </div>
+        <div className="mt-1 text-xs text-amber-100/75">
           {t('solar.altHour', {
             altitude: formatLocaleNumber(locale, solarState.sun.altitude, { maximumFractionDigits: 0 }),
             hour: formatLocaleNumber(locale, solarState.sun.hour, { maximumFractionDigits: 1, minimumFractionDigits: 1 }),
           })}
         </div>
-        <div className="mt-1 text-xs text-amber-100/75">
+        <div className="mt-1 text-xs text-amber-100/60">
           {incidenceDescriptor}
         </div>
       </div>
@@ -1032,28 +1423,30 @@ export default function SolarPanelCanvas({ compact = false }) {
       {contextLost ? (
         <ContextLostFallback onRetry={handleRetry} />
       ) : (
-        <Canvas
-          key={canvasKey}
-          className="h-full w-full"
-          dpr={1}
-          shadows
-          camera={{ position: compact ? [4.7, 2.95, 6.1] : [5.95, 3.45, 7.05], fov: compact ? 38 : 34 }}
-          gl={{
-            antialias: false,
-            alpha: true,
-            powerPreference: 'default',
-            preserveDrawingBuffer: false,
-            stencil: false,
-          }}
-          onCreated={handleCreated}
-        >
-          <Scene
-            solarState={solarState}
-            compact={compact}
-            geometryLabel={t('solar.solarGeometryLive')}
-            azimuthLabel={t('solar.panelSunAzimuth')}
-          />
-        </Canvas>
+        <div className="heliosync-canvas-stage absolute inset-0">
+          <Canvas
+            key={canvasKey}
+            className="h-full w-full"
+            dpr={compactView ? [1, 1.15] : [1, 1.45]}
+            shadows
+            camera={{ position: compactView ? [1.55, 3.55, 7.25] : [3.45, 5.15, 10.8], fov: compactView ? 39 : 40 }}
+            gl={{
+              antialias: true,
+              alpha: true,
+              powerPreference: 'default',
+              preserveDrawingBuffer: false,
+              stencil: false,
+            }}
+            onCreated={handleCreated}
+          >
+            <Scene
+              solarState={solarState}
+              compact={compactView}
+              azimuthLabel={t('solar.panelSunAzimuth')}
+              targetGuideLabel={t('solar.targetPanelGuide')}
+            />
+          </Canvas>
+        </div>
       )}
     </div>
   );

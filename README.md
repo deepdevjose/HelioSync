@@ -124,6 +124,18 @@ VITE_FIREBASE_MEASUREMENT_ID="..."
 
 Si estas variables faltan, la app entra en modo local/mock para no romper el flujo de trabajo.
 
+Para conectar el prototipo ESP32 durante desarrollo:
+
+```env
+VITE_HELIOSYNC_DEVICE_URL="http://192.168.4.1"
+VITE_HELIOSYNC_LATITUDE="20.05"
+VITE_HELIOSYNC_LONGITUDE="-99.22"
+VITE_HELIOSYNC_REQUEST_GEOLOCATION="true"
+VITE_REQUIRE_AUTH="false"
+```
+
+`VITE_REQUIRE_AUTH` solo vuelve a proteger el dashboard cuando vale `"true"`.
+
 ### Ejecutar en local
 
 ```bash
@@ -136,6 +148,65 @@ npm run dev
 npm run lint
 npm run build
 ```
+
+### Empaquetar la web dentro del ESP32
+
+Para que el cliente abra HelioSync directo desde el AP del ESP32, sin levantar Vite ni un servidor en una laptop:
+
+```bash
+npm run build:esp32
+```
+
+Ese comando genera `dist-esp32` y después embebe los assets comprimidos en:
+
+```txt
+heliosync_firmware_v3/web_assets.h
+```
+
+Luego compila/sube `heliosync_firmware_v3.ino` con una partición grande:
+
+- Arduino IDE: `Tools > Partition Scheme > No OTA (2MB APP/2MB SPIFFS)`
+- Arduino CLI:
+
+```bash
+arduino-cli compile --profile esp32 heliosync_firmware_v3
+```
+
+El perfil `esp32` está guardado en `heliosync_firmware_v3/sketch.yaml`.
+
+Si en el futuro el bundle crece demasiado, usa `Huge APP (3MB No OTA/1MB SPIFFS)` como plan B, sabiendo que deja menos espacio para histórico local.
+
+Después de flashear, conecta el móvil o laptop al AP `HelioSync-XXXX` y abre:
+
+```txt
+http://192.168.4.1
+```
+
+La app React completa se sirve desde el ESP32. El diagnóstico técnico quedó en:
+
+```txt
+http://192.168.4.1/diagnostics
+```
+
+### Flujo real de cliente
+
+1. El usuario prende el prototipo.
+2. Se conecta a la red de la etiqueta, por QR o contraseña.
+3. El portal cautivo del ESP32 abre HelioSync y muestra la configuración inicial.
+4. El usuario captura el WiFi de casa. El ESP32 apaga temporalmente el AP, prueba esa red, guarda las credenciales si funcionan y vuelve a abrir `HelioSync-XXXX`.
+5. Si Firebase está configurado en firmware, el usuario captura correo y contraseña. El ESP32 vuelve a usar el WiFi externo para crear o validar la cuenta y guarda una sesión local. Si Firebase no está configurado, este paso se omite y el sistema queda en modo local.
+6. El usuario comparte ubicación del teléfono o escribe latitud/longitud. Esa ubicación se guarda solo en el ESP32 para el algoritmo solar.
+7. El dashboard corre desde `http://192.168.4.1/dashboard` sin Node.js, laptop ni servidor externo.
+
+Para habilitar Firebase Auth desde el ESP32, compila definiendo la API key pública de Firebase:
+
+```bash
+arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=no_ota \
+  --build-property compiler.cpp.extra_flags='-DHELIOSYNC_FIREBASE_API_KEY=\"TU_API_KEY\"' \
+  heliosync_firmware_v3
+```
+
+Si esa clave no está presente, HelioSync muestra modo local y conserva el histórico de 30 días en LittleFS.
 
 ## Firebase
 

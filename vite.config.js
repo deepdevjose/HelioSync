@@ -47,14 +47,16 @@ export default defineConfig({
         display: 'standalone',
         icons: [
           {
-             src: 'sun_icon192.png', // Placeholder
-             sizes: '192x192',
-             type: 'image/png'
+             src: 'favicon.svg',
+             sizes: '48x46',
+             type: 'image/svg+xml',
+             purpose: 'any'
           },
           {
-             src: 'sun_icon512.png', // Placeholder
-             sizes: '512x512',
-             type: 'image/png'
+             src: 'favicon.svg',
+             sizes: '48x46',
+             type: 'image/svg+xml',
+             purpose: 'maskable'
           }
         ]
       },

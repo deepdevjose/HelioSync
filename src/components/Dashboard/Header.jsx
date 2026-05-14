@@ -20,6 +20,7 @@ export default function Header() {
   const lastUpdatedAt = useHelioStore((state) => state.lastUpdatedAt);
   const userSetup = useHelioStore((state) => state.userSetup);
   const userProfile = useHelioStore((state) => state.userProfile);
+  const session = useHelioStore((state) => state.session);
   const [now, setNow] = useState(() => Date.now());
   const [signingOut, setSigningOut] = useState(false);
 
@@ -80,15 +81,17 @@ export default function Header() {
           <span className="truncate">{insights.syncLabel} · {updatedLabel}</span>
         </div>
 
-        <button
-          type="button"
-          onClick={handleSignOut}
-          disabled={signingOut}
-          className="inline-flex w-full items-center justify-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-300 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60 sm:col-span-2 lg:w-auto"
-        >
-          {signingOut ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <LogOut className="h-4 w-4" />}
-          <span>{t('common.signOut')}</span>
-        </button>
+        {session ? (
+          <button
+            type="button"
+            onClick={handleSignOut}
+            disabled={signingOut}
+            className="inline-flex w-full items-center justify-center gap-2 rounded-full border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-300 transition hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-60 sm:col-span-2 lg:w-auto"
+          >
+            {signingOut ? <LoaderCircle className="h-4 w-4 animate-spin" /> : <LogOut className="h-4 w-4" />}
+            <span>{t('common.signOut')}</span>
+          </button>
+        ) : null}
       </div>
     </header>
   );
