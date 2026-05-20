@@ -50,7 +50,7 @@ export function LocaleProvider({ children }) {
 
     const t = (key, params) => {
       const dictionary = messages[locale] || messages[DEFAULT_LOCALE];
-      const fallbackDictionary = messages.en;
+      const fallbackDictionary = messages[DEFAULT_LOCALE];
       const valueAtKey = getValue(dictionary, key) ?? getValue(fallbackDictionary, key) ?? key;
       return interpolate(valueAtKey, params);
     };

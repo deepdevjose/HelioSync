@@ -2,7 +2,6 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Compass, MapPin, MoveHorizontal, SunMedium } from 'lucide-react';
 import { GlassCard } from '../ui/GlassCard';
-import LanguageToggle from '../ui/LanguageToggle';
 import { useLocale } from '../../i18n/locale';
 
 const AUTH_VISUAL_PIVOT = { x: 182, y: 128 };
@@ -253,7 +252,6 @@ export default function AuthShell({ eyebrow, title, subtitle, children, footer }
                 {t('common.brand')}
               </div>
 
-              <LanguageToggle />
             </div>
 
             <div className="space-y-4 sm:space-y-5">

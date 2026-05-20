@@ -14,7 +14,6 @@ import {
 } from 'lucide-react';
 import { GlassCard } from '../components/ui/GlassCard';
 import { AuthInput } from '../components/auth/AuthShell';
-import LanguageToggle from '../components/ui/LanguageToggle';
 import { useHelioStore } from '../store/useHelioStore';
 import { getAuthProvider, updateCurrentUserDisplayName } from '../services/authClient';
 import { getAuthErrorMessage } from '../services/authMessages';
@@ -822,7 +821,6 @@ export default function Onboarding() {
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
-            <LanguageToggle />
             <div className="rounded-2xl border border-white/10 bg-white/[0.05] px-4 py-3 text-sm text-slate-300">
               {t('common.stepOf', { current: currentStep + 1, total: steps.length })}
             </div>

@@ -21,8 +21,9 @@ export default function EnvironmentCard() {
   const status = useHelioStore((state) => state.status);
   const data = useHelioStore((state) => state.data);
   const history = useHelioStore((state) => state.history);
+  const telemetrySource = useHelioStore((state) => state.telemetrySource);
   const userSetup = useHelioStore((state) => state.userSetup);
-  const insights = getDashboardInsights(data, status, history, userSetup, locale, t);
+  const insights = getDashboardInsights(data, status, history, userSetup, locale, t, telemetrySource === 'device');
 
   return (
     <GlassCard delay={0.2} className="flex h-full min-h-[300px] flex-col gap-5 !p-5 sm:min-h-[340px] sm:!p-6 md:!p-7">

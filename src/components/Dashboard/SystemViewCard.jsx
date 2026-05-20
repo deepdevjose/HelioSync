@@ -27,10 +27,13 @@ export default function SystemViewCard() {
   const status = useHelioStore((state) => state.status);
   const data = useHelioStore((state) => state.data);
   const history = useHelioStore((state) => state.history);
+  const telemetrySource = useHelioStore((state) => state.telemetrySource);
   const userSetup = useHelioStore((state) => state.userSetup);
-  const insights = getDashboardInsights(data, status, history, userSetup, locale, t);
+  const hasLiveTelemetry = telemetrySource === 'device';
+  const insights = getDashboardInsights(data, status, history, userSetup, locale, t, hasLiveTelemetry);
   const alignmentPercent = Math.round(Math.max(0, Math.min(1, insights.outputState.ratio)) * 100);
   const geometryGuide = buildSolarGeometryGuide(data);
+  const solarGeometryReady = geometryGuide.solarValid;
   const formatDeg = (value, digits = 1) => `${formatLocaleNumber(locale, value, {
     maximumFractionDigits: digits,
     minimumFractionDigits: digits,
@@ -73,6 +76,11 @@ export default function SystemViewCard() {
       </div>
 
       {expanded ? (
+        !hasLiveTelemetry ? (
+          <div className="flex min-h-[320px] flex-1 items-center justify-center rounded-[24px] border border-dashed border-white/10 bg-black/10 px-5 text-center text-sm leading-6 text-slate-400 sm:min-h-[420px] sm:rounded-[28px] sm:px-6 lg:min-h-[560px]">
+            {t('dashboard.waitingForTelemetryBody')}
+          </div>
+        ) : (
         <>
           <div className="min-w-0">
             <SolarPanelCanvas />
@@ -82,15 +90,15 @@ export default function SystemViewCard() {
             <div className="rounded-2xl border border-amber-300/14 bg-amber-300/[0.07] px-4 py-3">
               <div className="text-[11px] uppercase tracking-[0.24em] text-amber-100/55">{t('solar.placePanelToward')}</div>
               <div className="mt-2 text-lg font-medium text-white">
-                {formatDeg(geometryGuide.targetAzimuth, 0)} {geometryGuide.cardinal}
+                {solarGeometryReady ? `${formatDeg(geometryGuide.targetAzimuth, 0)} ${geometryGuide.cardinal}` : '—'}
               </div>
-              <div className="mt-1 text-sm text-amber-100/65">{t('solar.azimuthFromGeometry')}</div>
+              <div className="mt-1 text-sm text-amber-100/65">{solarGeometryReady ? t('solar.azimuthFromGeometry') : t('solar.waitingBrowserGps')}</div>
             </div>
 
             <div className="rounded-2xl border border-amber-300/14 bg-amber-300/[0.07] px-4 py-3">
               <div className="text-[11px] uppercase tracking-[0.24em] text-amber-100/55">{t('solar.targetTilt')}</div>
-              <div className="mt-2 text-lg font-medium text-white">{formatDeg(geometryGuide.targetTilt)}</div>
-              <div className="mt-1 text-sm text-amber-100/65">{t('solar.normalToSun')}</div>
+              <div className="mt-2 text-lg font-medium text-white">{solarGeometryReady ? formatDeg(geometryGuide.targetTilt) : '—'}</div>
+              <div className="mt-1 text-sm text-amber-100/65">{solarGeometryReady ? t('solar.normalToSun') : t('solar.waitingBrowserGps')}</div>
             </div>
 
             <div className="rounded-2xl border border-sky-300/14 bg-sky-300/[0.07] px-4 py-3">
@@ -111,14 +119,16 @@ export default function SystemViewCard() {
           <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
             <div className="rounded-2xl border border-white/[0.08] bg-black/10 px-4 py-3">
               <div className="text-[11px] uppercase tracking-[0.24em] text-slate-500">{t('dashboard.solarAlignment')}</div>
-              <div className="mt-2 text-lg font-medium text-white">{alignmentPercent}%</div>
+              <div className="mt-2 text-lg font-medium text-white">{solarGeometryReady ? `${alignmentPercent}%` : '—'}</div>
               <div className="mt-1 text-sm text-slate-400">{insights.trackingLabel}</div>
             </div>
 
             <div className="rounded-2xl border border-white/[0.08] bg-black/10 px-4 py-3">
               <div className="text-[11px] uppercase tracking-[0.24em] text-slate-500">{t('dashboard.tiltTarget')}</div>
               <div className="mt-2 text-lg font-medium text-white">
-                {data.panel.angle_measured_deg.toFixed(1)}° / {data.panel.angle_target_deg.toFixed(1)}°
+                {solarGeometryReady
+                  ? `${data.panel.angle_measured_deg.toFixed(1)}° / ${data.panel.angle_target_deg.toFixed(1)}°`
+                  : `${data.panel.angle_measured_deg.toFixed(1)}° / —`}
               </div>
               <div className="mt-1 text-sm text-slate-400">{t('dashboard.measuredVsOptimal')}</div>
             </div>
@@ -130,6 +140,7 @@ export default function SystemViewCard() {
             </div>
           </div>
         </>
+        )
       ) : (
           <div className="flex min-h-[180px] flex-1 items-center justify-center rounded-[24px] border border-dashed border-white/10 bg-black/10 px-5 text-center text-sm leading-6 text-slate-400 sm:min-h-[220px] sm:rounded-[28px] sm:px-6">
             {t('dashboard.heroCollapsed')}

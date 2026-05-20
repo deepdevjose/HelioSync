@@ -16,6 +16,8 @@ import { applySetupToTelemetry, getConnectivityStatus } from '../services/userDa
  * @property {number} temp_c
  * @property {number} humidity_rh
  * @property {number} lux_bh1750
+ * @property {boolean} dht_ok
+ * @property {boolean} bh_ok
  */
 
 /**
@@ -24,7 +26,12 @@ import { applySetupToTelemetry, getConnectivityStatus } from '../services/userDa
  * @property {number} angle_measured_deg
  * @property {number} angle_error_deg
  * @property {number} azimuth_deg
+ * @property {number} roll_deg
+ * @property {number} pitch_raw_deg
+ * @property {number} roll_raw_deg
  * @property {boolean} gyro_stable
+ * @property {boolean} mpu_ok
+ * @property {boolean} orientation_calibrated
  * @property {boolean} servo_active
  * @property {string} tracking_mode
  */
@@ -53,44 +60,62 @@ import { applySetupToTelemetry, getConnectivityStatus } from '../services/userDa
  * @property {DiagnosticsData} diagnostics
  */
 
-// Datos de prueba iniciales basados en el payload
-const initialMockData = {
-  seq: 1234,
-  simHour: 12,
+// Estado inicial vacío — los datos reales llegan del ESP32 por WebSocket
+const baseTelemetryData = {
+  seq: 0,
+  simHour: new Date().getHours(),
   meta: {
-    project: "HelioSync",
-    nodeId: "nodo1",
-    location: "Atitalaquia, Hidalgo, Mexico",
-    mode: "STATIC_TEST",
-    timestamp: "2026-03-25T12:00:00-06:00"
+    project: 'HelioSync',
+    nodeId: '—',
+    location: '—',
+    mode: '—',
+    timestamp: '',
   },
   environment: {
-    temp_c: 22.5,
-    humidity_rh: 40.5,
-    lux_bh1750: 62000
+    temp_c: 0,
+    humidity_rh: 0,
+    lux_bh1750: 0,
+    dht_ok: false,
+    bh_ok: false,
   },
   panel: {
-    angle_target_deg: 54.0,
-    angle_measured_deg: 53.8,
-    angle_error_deg: -0.2,
+    angle_target_deg: 0,
+    angle_measured_deg: 0,
+    angle_error_deg: 0,
     roll_deg: 0,
+    pitch_raw_deg: 0,
+    roll_raw_deg: 0,
     azimuth_deg: 180,
-    gyro_stable: true,
+    gyro_stable: false,
+    mpu_ok: false,
+    orientation_calibrated: false,
     servo_active: false,
-    tracking_mode: "STATIC"
+    tracking_mode: 'STATIC',
   },
   electrical: {
-    voltage_v: 19.5,
-    current_a: 1.7,
-    power_w: 33.15
+    voltage_v: 0,
+    current_a: 0,
+    power_w: 0,
+    ina_ok: false,
+  },
+  sensor_status: {
+    dht22: false,
+    ina219: false,
+    bh1750: false,
+    mpu6050: false,
   },
   diagnostics: {
-    simulation: true,
-    profile: "clear_sky_static_panel"
+    simulation: false,
+    profile: 'waiting',
+    uptime_s: 0,
+    free_heap: 0,
+    ntp_ready: false,
+    ws_clients: 0,
+    ap_ssid: '',
   },
   solar: {
     azimuth_deg: 180,
-    elevation_deg: 45,
+    elevation_deg: 0,
     valid: false,
   },
   alert: {
@@ -106,35 +131,16 @@ const initialMockData = {
     near_full: false,
     retention_days: 30,
     cloud_ready: false,
-  }
+  },
 };
-
-const baseTelemetryData = structuredClone(initialMockData);
-
-// Array histórico pre-cargado para demostración en Card 3 (24 horas)
-const initialHistory = Array.from({ length: 24 }, (_, i) => {
-  const basePower = 33.15;
-  const hour = i;
-  let simulatedPower = 0;
-  
-  if (hour > 6 && hour < 19) {
-    // Curva de campana para simular ciclo solar
-    simulatedPower = basePower * Math.sin(((hour - 6) / 12) * Math.PI) + (Math.random() * 5 - 2.5);
-  }
-
-  return {
-    time: `${hour.toString().padStart(2, '0')}:00`,
-    power_w: Math.max(0, simulatedPower).toFixed(2),
-  };
-});
 
 
 export const useHelioStore = create((set) => ({
   status: 'ESP AP', // 'Online' | 'Offline' | 'ESP AP'
   data: structuredClone(baseTelemetryData),
-  history: initialHistory,
+  history: [],
   lastUpdatedAt: Date.now(),
-  telemetrySource: 'mock', // 'mock' | 'device'
+  telemetrySource: 'waiting', // 'waiting' | 'mock' | 'device'
   session: null, // Firebase Auth session
   authReady: false,
   userProfile: null,
@@ -185,7 +191,7 @@ export const useHelioStore = create((set) => ({
     userProfile: null,
     userSetup: null,
     data: structuredClone(baseTelemetryData),
-    history: initialHistory,
-    telemetrySource: 'mock',
+    history: [],
+    telemetrySource: 'waiting',
   }),
 }));

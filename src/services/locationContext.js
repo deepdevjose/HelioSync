@@ -1,8 +1,8 @@
 const GEOCODING_API_URL = 'https://geocoding-api.open-meteo.com/v1/search';
 const FORECAST_API_URL = 'https://api.open-meteo.com/v1/forecast';
 
-function normalizeApiLanguage(locale = 'en') {
-  return locale.toLowerCase().startsWith('es') ? 'es' : 'en';
+function normalizeApiLanguage() {
+  return 'es';
 }
 
 function buildLocationQuery(location = {}) {
@@ -53,7 +53,7 @@ async function fetchJson(url, signal) {
   return payload;
 }
 
-async function geocodeLocation(location = {}, locale = 'en', signal) {
+async function geocodeLocation(location = {}, locale = 'es-MX', signal) {
   const query = buildLocationQuery(location);
 
   if (query.length < 2) {
@@ -131,7 +131,7 @@ export function isAbortError(error) {
   return error instanceof DOMException && error.name === 'AbortError';
 }
 
-export async function resolveLocationContext(location = {}, locale = 'en', signal) {
+export async function resolveLocationContext(location = {}, locale = 'es-MX', signal) {
   const resolvedLocation = hasCoordinates(location)
     ? {
         ...location,

@@ -3,13 +3,13 @@ import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
-  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "dummy_api_key",
-  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "dummy_domain",
-  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "dummy_id",
-  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "dummy_bucket",
-  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "dummy_sender",
-  appId: import.meta.env.VITE_FIREBASE_APP_ID || "dummy_app_id",
-  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID || undefined,
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "AIzaSyCntVnew9yfmqcUc2XFUVVCBzbOqx6AqAo",
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN || "heliosync.firebaseapp.com",
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID || "heliosync",
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET || "heliosync.firebasestorage.app",
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID || "55135390908",
+  appId: import.meta.env.VITE_FIREBASE_APP_ID || "1:55135390908:web:e91cf4a5cd38bc390b14b9",
+  measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID || "G-6NCTTY7DTG",
 };
 
 export const isFirebaseMockConfig =

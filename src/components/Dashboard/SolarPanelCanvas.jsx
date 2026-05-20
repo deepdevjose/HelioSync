@@ -217,7 +217,7 @@ function getPanelState(panel, sun, guide) {
   const tracking = supportsTracking(panel?.tracking_mode);
   const measuredTilt = THREE.MathUtils.clamp(
     panel?.angle_measured_deg ?? panel?.angle_target_deg ?? 54,
-    -25,
+    -88,
     88,
   );
   const measuredRoll = THREE.MathUtils.clamp(
@@ -308,8 +308,11 @@ function getSolarState(data) {
   const sun = getSunState(data?.simHour, data?.environment?.lux_bh1750, data?.solar);
   const panel = getPanelState(data?.panel, sun, guide);
   const powerFactor = THREE.MathUtils.clamp((data?.electrical?.power_w || 0) / 42, 0, 1);
+  const lightFactor = THREE.MathUtils.clamp((data?.environment?.lux_bh1750 || 0) / 70000, 0, 1);
   const solarImpact = THREE.MathUtils.clamp(
-    panel.incidenceFactor * 0.68 + sun.irradianceFactor * 0.22 + powerFactor * 0.1,
+    guide.solarValid
+      ? panel.incidenceFactor * 0.68 + sun.irradianceFactor * 0.22 + powerFactor * 0.1
+      : lightFactor * 0.52 + powerFactor * 0.48,
     0,
     1,
   );
@@ -835,26 +838,28 @@ function TrackerModel({ targetTilt, targetRoll, targetPan, solarImpact, castShad
     const remainingRoll = Math.abs(rollFrameRef.current.rotation.z - radRoll);
     const remainingMotion = Math.max(remainingPan, remainingTilt, remainingRoll);
 
-    if (remainingMotion > 0.018) {
-      settleUntilRef.current = time + 0.18;
+    if (remainingMotion > 0.01) {
+      settleUntilRef.current = time + 0.12;
     }
 
     const easing = remainingMotion > 0.12
-      ? 4.7
+      ? 13.5
       : time < settleUntilRef.current
-        ? 2.3
-        : 3.4;
+        ? 9.5
+        : 7.2;
+    const movingPulse = remainingMotion > 0.006 ? Math.sin(time * 14) * 0.012 : 0;
+    const movingLean = remainingMotion > 0.006 ? Math.sin(time * 10) * 0.006 : 0;
 
     heroRef.current.position.y = THREE.MathUtils.lerp(
       heroRef.current.position.y,
-      -0.18,
-      delta * 3,
+      -0.18 + movingPulse,
+      delta * 7,
     );
 
     heroRef.current.rotation.z = THREE.MathUtils.lerp(
       heroRef.current.rotation.z,
-      0,
-      delta * 2.4,
+      movingLean,
+      delta * 5.2,
     );
 
     azimuthRef.current.rotation.y = dampAngle(
@@ -1067,6 +1072,7 @@ function TrackerModel({ targetTilt, targetRoll, targetPan, solarImpact, castShad
 
 function Scene({ solarState, compact, azimuthLabel, targetGuideLabel }) {
   const { sun, panel, solarImpact } = solarState;
+  const hasSolarGeometry = Boolean(solarState.guide?.solarValid);
 
   return (
     <>
@@ -1074,14 +1080,14 @@ function Scene({ solarState, compact, azimuthLabel, targetGuideLabel }) {
       <fog attach="fog" args={['#08111D', 16, 30]} />
       <ambientLight intensity={0.68} color="#E8EEF8" />
       <hemisphereLight intensity={1.18} color="#F4FAFF" groundColor="#07101C" />
-      <SunLightRig sun={sun} solarImpact={solarImpact} />
+      {hasSolarGeometry ? <SunLightRig sun={sun} solarImpact={solarImpact} /> : null}
       <directionalLight position={[-4.8, 3.4, 6.4]} intensity={1.12} color="#8FD8FF" />
       <pointLight position={[-5, 0.9, -4]} intensity={1.05} distance={14} decay={2} color="#38BDF8" />
 
       <CameraRig compact={compact} />
       <StageAtmosphere solarImpact={solarImpact} />
-      <SunAccent position={sun.position} solarImpact={solarImpact} />
-      {!compact ? (
+      {hasSolarGeometry ? <SunAccent position={sun.position} solarImpact={solarImpact} /> : null}
+      {!compact && hasSolarGeometry ? (
         <>
           <IncidenceRays start={sun.position} targets={panel.targetPoints} intensity={solarImpact} />
           <AngleGuide
@@ -1116,7 +1122,7 @@ function Scene({ solarState, compact, azimuthLabel, targetGuideLabel }) {
         targetPan={panel.scenePan}
         solarImpact={solarImpact}
       />
-      {!compact ? (
+      {!compact && hasSolarGeometry ? (
         <CompassDial panelAzimuth={panel.guideAzimuth} sunAzimuth={sun.azimuth} label={azimuthLabel} />
       ) : null}
 
@@ -1168,11 +1174,12 @@ export default function SolarPanelCanvas({ compact = false }) {
   const motionState = useMemo(() => getPanelMotionState(panelData, t), [panelData, t]);
   const mountLabel = useMemo(() => getMountLabel(panelData.tracking_mode, t), [panelData.tracking_mode, t]);
   const incidenceDescriptor = useMemo(
-    () => getIncidenceDescriptor(solarState.panel.incidenceAngle, t),
-    [solarState.panel.incidenceAngle, t],
+    () => (guide.solarValid ? getIncidenceDescriptor(solarState.panel.incidenceAngle, t) : t('solar.waitingBrowserGps')),
+    [guide.solarValid, solarState.panel.incidenceAngle, t],
   );
   const compactView = compact || mobileView;
   const solarImpactPercent = Math.round(solarState.solarImpact * 100);
+  const solarImpactLabel = guide.solarValid ? `${solarImpactPercent}%` : '—';
 
   const playAlignmentTone = useCallback((force = false) => {
     if (!force && !alignmentSoundEnabled) {
@@ -1379,21 +1386,23 @@ export default function SolarPanelCanvas({ compact = false }) {
           {t('solar.alignmentLabel')}
         </div>
         <div className="mt-1 text-base font-semibold text-white sm:text-lg">
-          {solarImpactPercent}%
+          {solarImpactLabel}
         </div>
         <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/10 sm:mt-2">
           <div
             className={`h-full rounded-full transition-all duration-500 ${
               alignmentLocked ? 'bg-emerald-300' : 'bg-helium-300'
             }`}
-            style={{ width: `${solarImpactPercent}%` }}
+            style={{ width: `${guide.solarValid ? solarImpactPercent : 0}%` }}
           />
         </div>
         <div className="mt-1 text-[11px] text-slate-300/80 sm:text-xs">
-          {t('solar.sunLine', {
-            azimuth: formatLocaleNumber(locale, solarState.sun.azimuth, { maximumFractionDigits: 0 }),
-            delta: formatLocaleNumber(locale, solarState.panel.incidenceAngle, { maximumFractionDigits: 1, minimumFractionDigits: 1 }),
-          })}
+          {guide.solarValid
+            ? t('solar.sunLine', {
+                azimuth: formatLocaleNumber(locale, solarState.sun.azimuth, { maximumFractionDigits: 0 }),
+                delta: formatLocaleNumber(locale, solarState.panel.incidenceAngle, { maximumFractionDigits: 1, minimumFractionDigits: 1 }),
+              })
+            : t('solar.waitingBrowserGps')}
         </div>
         {alignmentLocked ? (
           <div className="mt-1 text-xs font-medium text-emerald-100/85">{t('solar.alignmentLocked')}</div>
@@ -1404,16 +1413,20 @@ export default function SolarPanelCanvas({ compact = false }) {
           {t('solar.geometryLabel')}
         </div>
         <div className="mt-1 text-sm font-medium text-white">
-          {t('solar.targetGeometry', {
-            azimuth: formatLocaleNumber(locale, guide.targetAzimuth, { maximumFractionDigits: 0 }),
-            tilt: formatLocaleNumber(locale, guide.targetTilt, { maximumFractionDigits: 1, minimumFractionDigits: 1 }),
-          })}
+          {guide.solarValid
+            ? t('solar.targetGeometry', {
+                azimuth: formatLocaleNumber(locale, guide.targetAzimuth, { maximumFractionDigits: 0 }),
+                tilt: formatLocaleNumber(locale, guide.targetTilt, { maximumFractionDigits: 1, minimumFractionDigits: 1 }),
+              })
+            : '—'}
         </div>
         <div className="mt-1 text-xs text-amber-100/75">
-          {t('solar.altHour', {
-            altitude: formatLocaleNumber(locale, solarState.sun.altitude, { maximumFractionDigits: 0 }),
-            hour: formatLocaleNumber(locale, solarState.sun.hour, { maximumFractionDigits: 1, minimumFractionDigits: 1 }),
-          })}
+          {guide.solarValid
+            ? t('solar.altHour', {
+                altitude: formatLocaleNumber(locale, solarState.sun.altitude, { maximumFractionDigits: 0 }),
+                hour: formatLocaleNumber(locale, solarState.sun.hour, { maximumFractionDigits: 1, minimumFractionDigits: 1 }),
+              })
+            : t('solar.waitingBrowserGps')}
         </div>
         <div className="mt-1 text-xs text-amber-100/60">
           {incidenceDescriptor}

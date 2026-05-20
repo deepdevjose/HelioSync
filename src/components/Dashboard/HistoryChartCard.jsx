@@ -23,8 +23,10 @@ export default function HistoryChartCard() {
   const status = useHelioStore((state) => state.status);
   const data = useHelioStore((state) => state.data);
   const history = useHelioStore((state) => state.history);
+  const telemetrySource = useHelioStore((state) => state.telemetrySource);
   const userSetup = useHelioStore((state) => state.userSetup);
-  const insights = getDashboardInsights(data, status, history, userSetup, locale, t);
+  const hasLiveTelemetry = telemetrySource === 'device';
+  const insights = getDashboardInsights(data, status, history, userSetup, locale, t, hasLiveTelemetry);
   const titleMap = {
     [t('insights.rising')]: t('history.risingWindow'),
     [t('insights.falling')]: t('history.fallingWindow'),
@@ -46,50 +48,56 @@ export default function HistoryChartCard() {
         </div>
       </div>
 
-      <div className="relative h-[220px] w-full min-w-0 sm:h-[260px] lg:h-[280px]">
-        <ResponsiveContainer
-          width="100%"
-          height="100%"
-          minWidth={0}
-          minHeight={220}
-          initialDimension={{ width: 640, height: 250 }}
-        >
-          <AreaChart data={history} margin={{ top: 10, right: 8, left: -22, bottom: 0 }}>
-            <defs>
-              <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#38BDF8" stopOpacity={0.3} />
-                <stop offset="95%" stopColor="#38BDF8" stopOpacity={0} />
-              </linearGradient>
-            </defs>
+      {hasLiveTelemetry && history.length > 0 ? (
+        <div className="relative h-[220px] w-full min-w-0 sm:h-[260px] lg:h-[280px]">
+          <ResponsiveContainer
+            width="100%"
+            height="100%"
+            minWidth={0}
+            minHeight={220}
+            initialDimension={{ width: 640, height: 250 }}
+          >
+            <AreaChart data={history} margin={{ top: 10, right: 8, left: -22, bottom: 0 }}>
+              <defs>
+                <linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="5%" stopColor="#38BDF8" stopOpacity={0.3} />
+                  <stop offset="95%" stopColor="#38BDF8" stopOpacity={0} />
+                </linearGradient>
+              </defs>
 
-            <CartesianGrid stroke="#ffffff0b" vertical={false} />
-            <XAxis
-              dataKey="time"
-              stroke="#8a94a7"
-              fontSize={11}
-              tickLine={false}
-              axisLine={false}
-              tickMargin={10}
-            />
-            <YAxis
-              stroke="#8a94a7"
-              fontSize={11}
-              tickLine={false}
-              axisLine={false}
-              tickFormatter={(value) => `${value}`}
-            />
-            <Tooltip content={<CustomTooltip formatTooltip={(value) => t('history.tooltipPower', { value })} />} cursor={{ stroke: '#38BDF8', strokeWidth: 1, strokeDasharray: '4 4' }} />
-            <Area
-              type="monotone"
-              dataKey="power_w"
-              stroke="#7DD3FC"
-              strokeWidth={2.5}
-              fill="url(#trendFill)"
-              fillOpacity={1}
-            />
-          </AreaChart>
-        </ResponsiveContainer>
-      </div>
+              <CartesianGrid stroke="#ffffff0b" vertical={false} />
+              <XAxis
+                dataKey="time"
+                stroke="#8a94a7"
+                fontSize={11}
+                tickLine={false}
+                axisLine={false}
+                tickMargin={10}
+              />
+              <YAxis
+                stroke="#8a94a7"
+                fontSize={11}
+                tickLine={false}
+                axisLine={false}
+                tickFormatter={(value) => `${value}`}
+              />
+              <Tooltip content={<CustomTooltip formatTooltip={(value) => t('history.tooltipPower', { value })} />} cursor={{ stroke: '#38BDF8', strokeWidth: 1, strokeDasharray: '4 4' }} />
+              <Area
+                type="monotone"
+                dataKey="power_w"
+                stroke="#7DD3FC"
+                strokeWidth={2.5}
+                fill="url(#trendFill)"
+                fillOpacity={1}
+              />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      ) : (
+        <div className="flex h-[220px] w-full min-w-0 items-center justify-center rounded-2xl border border-dashed border-white/10 bg-black/10 px-5 text-center text-sm leading-6 text-slate-400 sm:h-[260px] lg:h-[280px]">
+          {t('dashboard.waitingForTelemetryBody')}
+        </div>
+      )}
     </GlassCard>
   );
 }

@@ -8,6 +8,15 @@ export const HELIOSYNC_LONGITUDE = Number(import.meta.env.VITE_HELIOSYNC_LONGITU
 export const REQUEST_DEVICE_GEOLOCATION =
   import.meta.env.VITE_HELIOSYNC_REQUEST_GEOLOCATION !== 'false';
 
+export function isLocalDevOrigin() {
+  if (typeof window === 'undefined') {
+    return false;
+  }
+
+  const { hostname } = window.location;
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+}
+
 export function isDevicePortalOrigin() {
   if (typeof window === 'undefined') {
     return false;
@@ -15,4 +24,8 @@ export function isDevicePortalOrigin() {
 
   const { hostname } = window.location;
   return hostname === '192.168.4.1' || hostname.endsWith('.local');
+}
+
+export function isWebAuthRequired() {
+  return AUTH_REQUIRED || (!isDevicePortalOrigin() && !isLocalDevOrigin());
 }

@@ -3,20 +3,21 @@ import { Navigate, Route, Routes } from 'react-router-dom';
 import AppLoader from './components/ui/AppLoader';
 import { useHelioStore } from './store/useHelioStore';
 import { getAuthProvider, subscribeToSession } from './services/authClient';
-import { fetchDeviceSetupStatus, isSetupComplete } from './services/deviceSetup';
+import { fetchDeviceAuthStatus, fetchDeviceSetupStatus, isSetupComplete } from './services/deviceSetup';
 import { getUserSetup, syncUserProfileFromSession } from './services/userData';
 import { useLocale } from './i18n/locale';
-import { AUTH_REQUIRED, isDevicePortalOrigin } from './config/runtime';
+import { isDevicePortalOrigin, isWebAuthRequired } from './config/runtime';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const DeviceOnboarding = lazy(() => import('./pages/DeviceOnboarding'));
+const DeviceLogin = lazy(() => import('./pages/DeviceLogin'));
 const ForgotPassword = lazy(() => import('./pages/ForgotPassword'));
 const Login = lazy(() => import('./pages/Login'));
 const Onboarding = lazy(() => import('./pages/Onboarding'));
 const Register = lazy(() => import('./pages/Register'));
 
 function resolveUserPath(session, userSetup) {
-  if (!AUTH_REQUIRED) {
+  if (!isWebAuthRequired()) {
     return '/dashboard';
   }
 
@@ -61,7 +62,7 @@ function DashboardRoute({ children }) {
   const session = useHelioStore((state) => state.session);
   const userSetup = useHelioStore((state) => state.userSetup);
 
-  if (!AUTH_REQUIRED) {
+  if (!isWebAuthRequired()) {
     return children;
   }
 
@@ -93,15 +94,27 @@ function DeviceRootRedirect() {
   useEffect(() => {
     let active = true;
 
-    fetchDeviceSetupStatus()
-      .then((status) => {
+    fetchDeviceAuthStatus()
+      .then(async (authStatus) => {
+        if (authStatus?.account_required && !authStatus?.authenticated) {
+          return '/device-login';
+        }
+
+        const status = await fetchDeviceSetupStatus();
+        if (!authStatus?.local_account_ready) {
+          return '/setup';
+        }
+
+        return isSetupComplete(status) ? '/dashboard' : '/setup';
+      })
+      .then((nextTarget) => {
         if (active) {
-          setTarget(isSetupComplete(status) ? '/dashboard' : '/setup');
+          setTarget(nextTarget);
         }
       })
       .catch(() => {
         if (active) {
-          setTarget('/setup');
+          setTarget('/device-login');
         }
       });
 
@@ -115,6 +128,52 @@ function DeviceRootRedirect() {
   }
 
   return <Navigate to={target} replace />;
+}
+
+function DeviceAuthRoute({ children, requireLocalAccount = false }) {
+  const [redirect, setRedirect] = useState(null);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+
+    fetchDeviceAuthStatus()
+      .then((authStatus) => {
+        if (!active) {
+          return;
+        }
+
+        if (authStatus?.account_required && !authStatus?.authenticated) {
+          setRedirect('/device-login');
+        } else if (requireLocalAccount && !authStatus?.local_account_ready) {
+          setRedirect('/setup');
+        } else {
+          setRedirect('');
+        }
+
+        setReady(true);
+      })
+      .catch(() => {
+        if (active) {
+          setRedirect('/device-login');
+          setReady(true);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [requireLocalAccount]);
+
+  if (!ready) {
+    return <RouteLoader />;
+  }
+
+  if (redirect) {
+    return <Navigate to={redirect} replace />;
+  }
+
+  return children;
 }
 
 export default function App() {
@@ -134,7 +193,7 @@ export default function App() {
       return undefined;
     }
 
-    if (!AUTH_REQUIRED) {
+    if (!isWebAuthRequired()) {
       setAuthReady(true);
       return undefined;
     }
@@ -186,8 +245,23 @@ export default function App() {
       {devicePortal ? (
         <Routes>
           <Route path="/" element={<DeviceRootRedirect />} />
-          <Route path="/setup" element={<DeviceOnboarding />} />
-          <Route path="/dashboard" element={<Dashboard />} />
+          <Route path="/device-login" element={<DeviceLogin />} />
+          <Route
+            path="/setup"
+            element={(
+              <DeviceAuthRoute>
+                <DeviceOnboarding />
+              </DeviceAuthRoute>
+            )}
+          />
+          <Route
+            path="/dashboard"
+            element={(
+              <DeviceAuthRoute requireLocalAccount>
+                <Dashboard />
+              </DeviceAuthRoute>
+            )}
+          />
           <Route path="*" element={<DeviceRootRedirect />} />
         </Routes>
       ) : (

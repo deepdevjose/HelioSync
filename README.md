@@ -88,7 +88,7 @@ El proyecto ya cuenta con:
 
 - autenticación persistente
 - onboarding protegido
-- Firebase Auth + Firestore
+- nube con Firebase Auth + Firestore
 - localización básica del producto
 - dashboard semántico
 - vista 3D del sistema
@@ -100,7 +100,7 @@ El proyecto ya cuenta con:
 
 - Node.js 20+ recomendado
 - npm 10+ recomendado
-- un proyecto de Firebase si quieres auth real
+- proyecto Firebase `heliosync` para auth y reglas reales
 
 ### Instalar dependencias
 
@@ -110,7 +110,7 @@ npm install
 
 ### Variables de entorno
 
-Crea un archivo `.env.local` con:
+La app ya trae como default la configuración pública del proyecto `heliosync`. Si quieres sobreescribirla en desarrollo o en Cloudflare Pages, crea un archivo `.env.local` con:
 
 ```env
 VITE_FIREBASE_API_KEY="..."
@@ -122,7 +122,7 @@ VITE_FIREBASE_APP_ID="..."
 VITE_FIREBASE_MEASUREMENT_ID="..."
 ```
 
-Si estas variables faltan, la app entra en modo local/mock para no romper el flujo de trabajo.
+En `localhost` el dashboard puede seguir abierto para desarrollo. Fuera del portal ESP32 y fuera de local, la web exige sesión en la nube.
 
 Para conectar el prototipo ESP32 durante desarrollo:
 
@@ -194,11 +194,11 @@ http://192.168.4.1/diagnostics
 2. Se conecta a la red de la etiqueta, por QR o contraseña.
 3. El portal cautivo del ESP32 abre HelioSync y muestra la configuración inicial.
 4. El usuario captura el WiFi de casa. El ESP32 apaga temporalmente el AP, prueba esa red, guarda las credenciales si funcionan y vuelve a abrir `HelioSync-XXXX`.
-5. Si Firebase está configurado en firmware, el usuario captura correo y contraseña. El ESP32 vuelve a usar el WiFi externo para crear o validar la cuenta y guarda una sesión local. Si Firebase no está configurado, este paso se omite y el sistema queda en modo local.
+5. El usuario captura correo y contraseña. El ESP32 guarda primero el acceso local, luego intenta crear o validar esa misma cuenta en la nube. Si la nube falla, el usuario puede seguir en modo local y reintentar después desde `Configurar`.
 6. El usuario comparte ubicación del teléfono o escribe latitud/longitud. Esa ubicación se guarda solo en el ESP32 para el algoritmo solar.
 7. El dashboard corre desde `http://192.168.4.1/dashboard` sin Node.js, laptop ni servidor externo.
 
-Para habilitar Firebase Auth desde el ESP32, compila definiendo la API key pública de Firebase:
+El perfil normal ya incluye la API key pública de la nube para el ESP32. Si quieres usar otro proyecto, compila definiendo otra API key:
 
 ```bash
 arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=no_ota \
@@ -206,16 +206,22 @@ arduino-cli compile --fqbn esp32:esp32:esp32:PartitionScheme=no_ota \
   heliosync_firmware_v3
 ```
 
-Si esa clave no está presente, HelioSync muestra modo local y conserva el histórico de 30 días en LittleFS.
+Si la nube no responde, HelioSync conserva el histórico local de 30 días en LittleFS y permite seguir usando el panel.
 
-## Firebase
+## Nube y Reglas
 
-Para usar Firebase real, habilita:
+Para usar la nube real, habilita:
 
 - `Authentication` > `Email/Password`
 - `Authentication` > `Google`
 
-Y agrega como dominios autorizados:
+Las reglas de Firestore están en `firestore.rules`, y `firebase.json` apunta a ese archivo. Para publicarlas:
+
+```bash
+firebase deploy --only firestore:rules
+```
+
+Agrega como dominios autorizados:
 
 - `localhost`
 - tu subdominio de Cloudflare Pages
@@ -237,7 +243,7 @@ Build command: npm run build
 Build output directory: dist
 ```
 
-También debes configurar en Cloudflare Pages las mismas variables `VITE_FIREBASE_*` que usas localmente.
+Opcionalmente puedes configurar en Cloudflare Pages las mismas variables `VITE_FIREBASE_*` si quieres sobreescribir el proyecto default.
 
 ## Estructura del repositorio
 
@@ -281,7 +287,6 @@ HelioSync está construyéndose como una experiencia de asistencia solar:
 
 ## Pendientes razonables
 
-- refinar reglas de Firestore para producción
 - mejorar iconos del manifest PWA
 - optimizar el chunk de `three`
 - hacer smoke test completo en Cloudflare + Firebase real

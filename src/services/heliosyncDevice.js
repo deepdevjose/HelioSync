@@ -4,6 +4,7 @@ import {
   HELIOSYNC_LONGITUDE,
   REQUEST_DEVICE_GEOLOCATION,
 } from '../config/runtime';
+import { buildDeviceAuthHeaders, getDeviceSessionToken } from './deviceAuth';
 
 const DEFAULT_NODE_ID = 'esp32-prototype';
 const HISTORY_LIMIT = 48;
@@ -34,6 +35,10 @@ export function getDeviceBaseUrl() {
 export function getDeviceWebSocketUrl(baseUrl = getDeviceBaseUrl()) {
   const url = new URL('/ws', baseUrl);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  const token = getDeviceSessionToken();
+  if (token) {
+    url.searchParams.set('token', token);
+  }
   return url.toString();
 }
 
@@ -145,7 +150,7 @@ export function normalizeDevicePayload(raw = {}, previous = {}) {
   const timestamp = getTimestamp(raw, previous);
   const solarValid = toBoolean(raw?.solar?.valid, false);
   const measuredAngle = toNumber(
-    raw?.panel?.angle_measured_deg ?? raw?.panel?.pitch_deg,
+    raw?.panel?.tilt_deg ?? raw?.panel?.angle_measured_deg ?? raw?.panel?.pitch_deg,
     previous?.panel?.angle_measured_deg ?? 0,
     { rejectSentinel: true },
   );
@@ -194,6 +199,8 @@ export function normalizeDevicePayload(raw = {}, previous = {}) {
         previous?.environment?.lux_bh1750 ?? 0,
         { rejectSentinel: true },
       ),
+      dht_ok: toBoolean(raw?.environment?.dht_ok, previous?.environment?.dht_ok ?? false),
+      bh_ok: toBoolean(raw?.environment?.bh_ok, previous?.environment?.bh_ok ?? false),
     },
     panel: {
       angle_target_deg: targetAngle,
@@ -204,11 +211,29 @@ export function normalizeDevicePayload(raw = {}, previous = {}) {
         previous?.panel?.roll_deg ?? 0,
         { rejectSentinel: true },
       ),
+      pitch_raw_deg: toNumber(
+        raw?.panel?.pitch_raw_deg,
+        previous?.panel?.pitch_raw_deg ?? measuredAngle,
+        { rejectSentinel: true },
+      ),
+      roll_raw_deg: toNumber(
+        raw?.panel?.roll_raw_deg,
+        previous?.panel?.roll_raw_deg ?? previous?.panel?.roll_deg ?? 0,
+        { rejectSentinel: true },
+      ),
       azimuth_deg: normalizeDegrees(
         raw?.panel?.azimuth_deg ?? raw?.panel?.heading_deg ?? raw?.panel?.yaw_deg,
         previous?.panel?.azimuth_deg ?? 180,
       ),
-      gyro_stable: toBoolean(raw?.panel?.gyro_stable ?? raw?.panel?.mpu_ok, true),
+      gyro_stable: toBoolean(
+        raw?.panel?.gyro_stable ?? raw?.panel?.mpu_ok,
+        previous?.panel?.gyro_stable ?? false,
+      ),
+      mpu_ok: toBoolean(raw?.panel?.mpu_ok, previous?.panel?.mpu_ok ?? false),
+      orientation_calibrated: toBoolean(
+        raw?.panel?.orientation_calibrated ?? raw?.panel?.face_up_reference,
+        previous?.panel?.orientation_calibrated ?? false,
+      ),
       servo_active: toBoolean(raw?.panel?.servo_active, false),
       tracking_mode: getTrackingMode(raw, solarValid, previous),
     },
@@ -228,6 +253,13 @@ export function normalizeDevicePayload(raw = {}, previous = {}) {
         previous?.electrical?.power_w ?? 0,
         { rejectSentinel: true },
       ),
+      ina_ok: toBoolean(raw?.electrical?.ina_ok, previous?.electrical?.ina_ok ?? false),
+    },
+    sensor_status: {
+      dht22: toBoolean(raw?.environment?.dht_ok, previous?.sensor_status?.dht22 ?? false),
+      bh1750: toBoolean(raw?.environment?.bh_ok, previous?.sensor_status?.bh1750 ?? false),
+      ina219: toBoolean(raw?.electrical?.ina_ok, previous?.sensor_status?.ina219 ?? false),
+      mpu6050: toBoolean(raw?.panel?.mpu_ok, previous?.sensor_status?.mpu6050 ?? false),
     },
     diagnostics: {
       simulation: false,
@@ -300,7 +332,12 @@ export async function fetchLatestDevicePayload(baseUrl = getDeviceBaseUrl()) {
   try {
     const response = await fetch(`${stripTrailingSlash(baseUrl)}/data`, {
       cache: 'no-store',
+      credentials: 'same-origin',
       signal: controller.signal,
+      headers: {
+        Accept: 'application/json',
+        ...buildDeviceAuthHeaders(),
+      },
     });
 
     if (!response.ok) {
@@ -320,7 +357,8 @@ export async function postDeviceGps(baseUrl, gps) {
 
   await fetch(`${stripTrailingSlash(baseUrl)}/gps`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json', ...buildDeviceAuthHeaders() },
     body: JSON.stringify(withBrowserTime(gps)),
   });
 }

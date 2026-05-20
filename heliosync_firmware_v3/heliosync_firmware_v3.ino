@@ -8,7 +8,7 @@
  *  Algoritmo : Posición solar UPV/EHU (azimut + elevación)
  *  GPS       : Recibido desde la PWA (WS o HTTP POST)
  *  Storage   : LittleFS — histórico local 30 días (hourly)
- *  Firebase  : Bridge vía PWA — store-and-forward con consent.
+ *  Firebase  : Auth REST opcional desde el ESP32; fallback local 30 días.
  * ============================================================
  *
  *  DEPENDENCIAS (Arduino IDE / PlatformIO):
@@ -34,6 +34,7 @@
  *   /data/YYYY-MM-DD.jsonl  — una lectura por hora, formato JSONL
  *   /meta/index.json        — índice de archivos + espacio usado
  *   /meta/consent.json      — consentimiento del usuario
+ *   NVS heliosync           — WiFi, cuenta local, sesión 90 días
  *
  *  RETENCIÓN: 30 días. Al superar el límite se elimina el día
  *  más antiguo automáticamente (circular buffer por día).
@@ -51,6 +52,11 @@
 #include <LittleFS.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
+#include <esp_system.h>
+#include <esp_now.h>
+#include <esp_sleep.h>
+#include <esp_wifi.h>
+#include <mbedtls/md.h>
 
 // ── Servidor ──────────────────────────────────────────────
 #include <ESPAsyncWebServer.h>
@@ -71,12 +77,15 @@
 // ============================================================
 namespace Config {
 #ifndef HELIOSYNC_FIREBASE_API_KEY
-#define HELIOSYNC_FIREBASE_API_KEY ""
+#define HELIOSYNC_FIREBASE_API_KEY "AIzaSyCntVnew9yfmqcUc2XFUVVCBzbOqx6AqAo"
+#endif
+#ifndef HELIOSYNC_FIREBASE_PROJECT_ID
+#define HELIOSYNC_FIREBASE_PROJECT_ID "heliosync"
 #endif
 
   // WiFi AP
   static const char*         AP_PASS       = "heliosync";
-  static const int           AP_CHANNEL    = 6;
+  static const int           AP_CHANNEL    = 1; // Igual que el puente Heltec indoor por ESP-NOW
   static const int           AP_MAX_CONN   = 4;
   static const byte          DNS_PORT      = 53;
   static const unsigned long WIFI_TEST_MS  = 25000UL;
@@ -93,6 +102,8 @@ namespace Config {
   static const unsigned long WS_MS         = 1000UL;          // WebSocket broadcast
   static const unsigned long SOLAR_MS      = 60UL*60UL*1000UL;// recalcular sol
   static const unsigned long STORE_MS      = 60UL*60UL*1000UL;// guardar en LittleFS
+  static const uint64_t      SMART_SLEEP_US = 60ULL*60ULL*1000000ULL; // despertar cada 60 min
+  static const unsigned long TIMER_WAKE_WINDOW_MS = 12000UL;
 
   // LittleFS
   static const int           MAX_DAYS      = 30;    // días de retención
@@ -100,8 +111,9 @@ namespace Config {
 
   // Identidad del nodo
   static const char*         PROJECT_NAME  = "HelioSync";
-  static const char*         DEFAULT_LOCATION = "HelioSync ESP32";
+  static const char*         DEFAULT_LOCATION = "Panel HelioSync";
   static const char*         FIREBASE_API_KEY = HELIOSYNC_FIREBASE_API_KEY;
+  static const char*         FIREBASE_PROJECT_ID = HELIOSYNC_FIREBASE_PROJECT_ID;
 
   // Pines
   static const int           DHT_PIN       = 4;
@@ -142,9 +154,14 @@ struct Consent {
 };
 
 struct DeviceSetupState {
+  char operationMode[12] = "outdoor";
+  char heltecPeerMac[18] = "10:51:DB:52:8B:B4";
+  bool operationConfigured = false;
+
   bool wifiConfigured = false;
   bool wifiVerified   = false;
   bool wifiBusy       = false;
+  bool wifiSkipped    = false;
   char wifiSsid[33]   = "";
   char wifiError[96]  = "";
 
@@ -159,6 +176,39 @@ struct DeviceSetupState {
   bool locationSet    = false;
   bool setupComplete  = false;
   char locationSource[16] = "phone";
+};
+
+struct BridgeState {
+  bool ready = false;
+  bool peerConfigured = false;
+  bool initialBusy = false;
+  bool initialSent = false;
+  bool linkTestBusy = false;
+  bool linkTestOk = false;
+  uint8_t peerMac[6] = {0x10, 0x51, 0xDB, 0x52, 0x8B, 0xB4};
+  uint32_t sequence = 0;
+  uint32_t sentOk = 0;
+  uint32_t sentFail = 0;
+  unsigned long lastSendMs = 0;
+  char lastStatus[16] = "idle";
+  char error[96] = "";
+};
+
+struct PowerState {
+  bool smartSleep = false;
+  bool pendingSleep = false;
+  bool timerWake = false;
+  unsigned long sleepAt = 0;
+  esp_sleep_wakeup_cause_t wakeCause = ESP_SLEEP_WAKEUP_UNDEFINED;
+};
+
+struct LocalAuthState {
+  bool localAccountReady = false;
+  char username[96]      = "";
+  char passwordSalt[33]  = "";
+  char passwordHash[65]  = "";
+  char sessionToken[65]  = "";
+  uint64_t sessionUntil  = 0;
 };
 
 // Entrada del histórico local
@@ -189,6 +239,9 @@ GpsData    gps;
 Alert      alert;
 Consent    consent;
 DeviceSetupState setupState;
+LocalAuthState authState;
+BridgeState bridgeState;
+PowerState powerState;
 
 unsigned long lastWs    = 0;
 unsigned long lastSolar = 0;
@@ -201,7 +254,9 @@ bool          apActive  = false;
 enum SetupJobType {
   SETUP_JOB_NONE,
   SETUP_JOB_WIFI_VERIFY,
-  SETUP_JOB_FIREBASE_ACCOUNT
+  SETUP_JOB_FIREBASE_ACCOUNT,
+  SETUP_JOB_INDOOR_LINK_TEST,
+  SETUP_JOB_INDOOR_INITIAL_SEND
 };
 
 SetupJobType pendingSetupJob = SETUP_JOB_NONE;
@@ -210,6 +265,20 @@ String pendingWifiSsid;
 String pendingWifiPassword;
 String pendingAccountEmail;
 String pendingAccountPassword;
+
+bool applyEpochMs(double epochMsDouble){
+  if(epochMsDouble <= 1600000000000.0){
+    return false;
+  }
+
+  uint64_t epochMs = (uint64_t)epochMsDouble;
+  struct timeval tv;
+  tv.tv_sec = (time_t)(epochMs / 1000ULL);
+  tv.tv_usec = (suseconds_t)((epochMs % 1000ULL) * 1000ULL);
+  settimeofday(&tv, nullptr);
+  ntpOk = true;
+  return true;
+}
 
 // ============================================================
 //  NAMESPACE IMU — Filtro complementario MPU6050
@@ -468,9 +537,486 @@ namespace Storage {
                   LittleFS.usedBytes()/1024,
                   countDays());
   }
+
+  void clearDataDir(){
+    File root = LittleFS.open("/data");
+    if(root && root.isDirectory()){
+      File f = root.openNextFile();
+      while(f){
+        String name = f.name();
+        String path = name.startsWith("/") ? name : String("/data/") + name;
+        f.close();
+        LittleFS.remove(path);
+        f = root.openNextFile();
+      }
+    }
+  }
+
+  void factoryReset(){
+    clearDataDir();
+    LittleFS.remove("/meta/consent.json");
+    if(!LittleFS.exists("/data")) LittleFS.mkdir("/data");
+    if(!LittleFS.exists("/meta")) LittleFS.mkdir("/meta");
+    Serial.println("[FS] Historial y metadatos locales borrados");
+  }
 }
 
 void recalcSolar();
+void readAllSensors();
+void updateAlert();
+
+// ============================================================
+//  ESP-NOW INDOOR — ESP32 sensor -> Heltec A
+// ============================================================
+namespace EspNowBridge {
+  const uint8_t FLAG_DHT_OK = 1 << 0;
+  const uint8_t FLAG_BH_OK  = 1 << 1;
+  const uint8_t FLAG_INA_OK = 1 << 2;
+  const char* LINK_TEST_MESSAGE = "Todo fue correcto, ahora ya puedes volver a conectarte a la red de HelioSync";
+
+  typedef struct __attribute__((packed)) {
+    uint32_t seq;
+    float tempC;
+    float humRH;
+    float lux;
+    float voltageV;
+    float currentA;
+    float powerW;
+    uint8_t flags;
+  } SensorBridgePacket;
+
+  bool isIndoorMode(){
+    return strcmp(setupState.operationMode, "indoor") == 0;
+  }
+
+  int hexValue(char c){
+    if(c >= '0' && c <= '9') return c - '0';
+    if(c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if(c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+  }
+
+  bool parseMac(const String& macText, uint8_t out[6]){
+    if(macText.length() != 17) return false;
+
+    for(int i = 0; i < 6; i++){
+      int pos = i * 3;
+      int hi = hexValue(macText.charAt(pos));
+      int lo = hexValue(macText.charAt(pos + 1));
+      if(hi < 0 || lo < 0) return false;
+      if(i < 5 && macText.charAt(pos + 2) != ':') return false;
+      out[i] = (uint8_t)((hi << 4) | lo);
+    }
+
+    return true;
+  }
+
+  bool macLooksValid(const String& macText){
+    uint8_t tmp[6];
+    return parseMac(macText, tmp);
+  }
+
+  void copyError(const char* msg){
+    strlcpy(bridgeState.error, msg, sizeof(bridgeState.error));
+    strlcpy(bridgeState.lastStatus, "error", sizeof(bridgeState.lastStatus));
+  }
+
+  void onDataSent(const wifi_tx_info_t*, esp_now_send_status_t status){
+    bridgeState.lastSendMs = millis();
+    if(status == ESP_NOW_SEND_SUCCESS){
+      bridgeState.sentOk++;
+      strlcpy(bridgeState.lastStatus, "ok", sizeof(bridgeState.lastStatus));
+      strlcpy(bridgeState.error, "", sizeof(bridgeState.error));
+    } else {
+      bridgeState.sentFail++;
+      strlcpy(bridgeState.lastStatus, "fail", sizeof(bridgeState.lastStatus));
+      copyError("La tarjeta de pared no confirmó la lectura.");
+    }
+  }
+
+  void stop(){
+    if(bridgeState.ready){
+      esp_now_deinit();
+    }
+    bridgeState.ready = false;
+    bridgeState.peerConfigured = false;
+  }
+
+  bool beginOrRefresh(){
+    if(!isIndoorMode()){
+      stop();
+      strlcpy(bridgeState.error, "", sizeof(bridgeState.error));
+      strlcpy(bridgeState.lastStatus, "idle", sizeof(bridgeState.lastStatus));
+      return false;
+    }
+
+    WiFi.setSleep(false);
+    esp_wifi_set_ps(WIFI_PS_NONE);
+
+    uint8_t peer[6];
+    if(!parseMac(String(setupState.heltecPeerMac), peer)){
+      copyError("Código de la tarjeta de pared inválido. Escríbelo tal como aparece en la pantalla.");
+      bridgeState.peerConfigured = false;
+      return false;
+    }
+
+    memcpy(bridgeState.peerMac, peer, sizeof(bridgeState.peerMac));
+
+    if(!bridgeState.ready){
+      if(esp_now_init() != ESP_OK){
+        copyError("No pudimos preparar el envío a la tarjeta de pared.");
+        return false;
+      }
+      esp_now_register_send_cb(onDataSent);
+      bridgeState.ready = true;
+    }
+
+    esp_wifi_set_channel(Config::AP_CHANNEL, WIFI_SECOND_CHAN_NONE);
+
+    if(esp_now_is_peer_exist(bridgeState.peerMac)){
+      esp_now_del_peer(bridgeState.peerMac);
+    }
+
+    esp_now_peer_info_t peerInfo = {};
+    memcpy(peerInfo.peer_addr, bridgeState.peerMac, sizeof(peerInfo.peer_addr));
+    peerInfo.channel = Config::AP_CHANNEL;
+    peerInfo.encrypt = false;
+    peerInfo.ifidx = WIFI_IF_STA;
+
+    if(esp_now_add_peer(&peerInfo) != ESP_OK){
+      bridgeState.peerConfigured = false;
+      copyError("No pudimos guardar la tarjeta de pared como destino.");
+      return false;
+    }
+
+    bridgeState.peerConfigured = true;
+    strlcpy(bridgeState.error, "", sizeof(bridgeState.error));
+    if(strcmp(bridgeState.lastStatus, "idle") == 0 || strcmp(bridgeState.lastStatus, "error") == 0){
+      strlcpy(bridgeState.lastStatus, "ready", sizeof(bridgeState.lastStatus));
+    }
+    return true;
+  }
+
+  bool sendLatest(){
+    if(!isIndoorMode()){
+      return false;
+    }
+
+    if(!bridgeState.ready || !bridgeState.peerConfigured){
+      if(!beginOrRefresh()){
+        return false;
+      }
+    }
+
+    SensorBridgePacket pkt = {};
+    pkt.seq = ++bridgeState.sequence;
+    pkt.tempC = sensors.dhtOk ? sensors.tempC : -999.0f;
+    pkt.humRH = sensors.dhtOk ? sensors.humidRH : -999.0f;
+    pkt.lux = sensors.bhOk ? sensors.lux : -1.0f;
+    pkt.voltageV = sensors.inaOk ? sensors.voltageV : -999.0f;
+    pkt.currentA = sensors.inaOk ? sensors.currentA : -999.0f;
+    pkt.powerW = sensors.inaOk ? sensors.powerW : -999.0f;
+    pkt.flags = 0;
+    if(sensors.dhtOk) pkt.flags |= FLAG_DHT_OK;
+    if(sensors.bhOk) pkt.flags |= FLAG_BH_OK;
+    if(sensors.inaOk) pkt.flags |= FLAG_INA_OK;
+
+    esp_err_t result = esp_now_send(bridgeState.peerMac, (uint8_t*)&pkt, sizeof(pkt));
+    if(result != ESP_OK){
+      bridgeState.sentFail++;
+      copyError("No pudimos enviar la lectura a la tarjeta de pared.");
+      return false;
+    }
+
+    strlcpy(bridgeState.lastStatus, "tx", sizeof(bridgeState.lastStatus));
+    return true;
+  }
+
+  bool sendLatestWithRetries(uint8_t attempts = 3, unsigned long ackTimeoutMs = 800UL){
+    for(uint8_t attempt = 0; attempt < attempts; attempt++){
+      uint32_t okBefore = bridgeState.sentOk;
+      uint32_t failBefore = bridgeState.sentFail;
+
+      if(!sendLatest()){
+        delay(120);
+        continue;
+      }
+
+      unsigned long startedAt = millis();
+      while(bridgeState.sentOk == okBefore && bridgeState.sentFail == failBefore && millis() - startedAt < ackTimeoutMs){
+        delay(20);
+      }
+
+      if(bridgeState.sentOk > okBefore){
+        return true;
+      }
+
+      delay(180);
+    }
+
+    return false;
+  }
+
+  bool sendTextWithRetries(const char* text, uint8_t attempts = 6, unsigned long ackTimeoutMs = 850UL){
+    if(!isIndoorMode()){
+      return false;
+    }
+
+    if(!bridgeState.ready || !bridgeState.peerConfigured){
+      if(!beginOrRefresh()){
+        return false;
+      }
+    }
+
+    size_t len = strlen(text);
+    for(uint8_t attempt = 0; attempt < attempts; attempt++){
+      uint32_t okBefore = bridgeState.sentOk;
+      uint32_t failBefore = bridgeState.sentFail;
+      esp_err_t result = esp_now_send(bridgeState.peerMac, (const uint8_t*)text, len);
+      if(result != ESP_OK){
+        bridgeState.sentFail++;
+        copyError("No pudimos enviar el mensaje de prueba a la tarjeta de pared.");
+        delay(160);
+        continue;
+      }
+
+      strlcpy(bridgeState.lastStatus, "test", sizeof(bridgeState.lastStatus));
+      unsigned long startedAt = millis();
+      while(bridgeState.sentOk == okBefore && bridgeState.sentFail == failBefore && millis() - startedAt < ackTimeoutMs){
+        delay(20);
+      }
+
+      if(bridgeState.sentOk > okBefore){
+        strlcpy(bridgeState.lastStatus, "ok", sizeof(bridgeState.lastStatus));
+        strlcpy(bridgeState.error, "", sizeof(bridgeState.error));
+        return true;
+      }
+
+      delay(220);
+    }
+
+    if(strlen(bridgeState.error) == 0){
+      copyError("La tarjeta de pared no respondió. Revisa que esté encendida y que el código sea correcto.");
+    }
+    return false;
+  }
+}
+
+// ============================================================
+//  AUTH LOCAL — cuenta y sesión guardadas en el ESP32
+// ============================================================
+namespace DeviceAuth {
+  static const uint64_t SESSION_SECONDS = 90ULL * 24ULL * 60ULL * 60ULL;
+
+  String normalizeUsername(String value){
+    value.trim();
+    value.toLowerCase();
+    return value;
+  }
+
+  bool hasTrustedClock(){
+    return time(nullptr) > 1600000000;
+  }
+
+  uint64_t nextSessionExpiry(){
+    time_t now = time(nullptr);
+    if(now > 1600000000){
+      return (uint64_t)now + SESSION_SECONDS;
+    }
+
+    return 0;
+  }
+
+  String bytesToHex(const uint8_t* bytes, size_t len){
+    static const char* HEX_CHARS = "0123456789abcdef";
+    String out;
+    out.reserve(len * 2);
+
+    for(size_t i = 0; i < len; i++){
+      out += HEX_CHARS[(bytes[i] >> 4) & 0x0F];
+      out += HEX_CHARS[bytes[i] & 0x0F];
+    }
+
+    return out;
+  }
+
+  String randomHex(size_t bytes){
+    String out;
+    out.reserve(bytes * 2);
+
+    for(size_t i = 0; i < bytes; i++){
+      uint8_t b = (uint8_t)(esp_random() & 0xFF);
+      char chunk[3];
+      snprintf(chunk, sizeof(chunk), "%02x", b);
+      out += chunk;
+    }
+
+    return out;
+  }
+
+  String sha256Hex(const String& input){
+    uint8_t digest[32];
+    const mbedtls_md_info_t* info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if(!info || mbedtls_md(info, (const unsigned char*)input.c_str(), input.length(), digest) != 0){
+      return "";
+    }
+
+    return bytesToHex(digest, sizeof(digest));
+  }
+
+  bool safeEquals(const char* stored, const String& candidate){
+    size_t storedLen = strlen(stored);
+    if(storedLen != candidate.length()){
+      return false;
+    }
+
+    uint8_t diff = 0;
+    for(size_t i = 0; i < storedLen; i++){
+      diff |= ((uint8_t)stored[i]) ^ ((uint8_t)candidate[i]);
+    }
+
+    return diff == 0;
+  }
+
+  void load(){
+    prefs.begin("heliosync", true);
+    String username = prefs.getString("auth_user", "");
+    String salt = prefs.getString("auth_salt", "");
+    String hash = prefs.getString("auth_hash", "");
+    String token = prefs.getString("auth_token", "");
+    uint64_t until = prefs.getULong64("auth_until", 0);
+    prefs.end();
+
+    authState.localAccountReady = username.length() > 0 && salt.length() > 0 && hash.length() == 64;
+    strlcpy(authState.username, username.c_str(), sizeof(authState.username));
+    strlcpy(authState.passwordSalt, salt.c_str(), sizeof(authState.passwordSalt));
+    strlcpy(authState.passwordHash, hash.c_str(), sizeof(authState.passwordHash));
+    strlcpy(authState.sessionToken, token.c_str(), sizeof(authState.sessionToken));
+    authState.sessionUntil = until;
+  }
+
+  bool hasActiveSession(){
+    if(!authState.localAccountReady || strlen(authState.sessionToken) == 0){
+      return false;
+    }
+
+    if(authState.sessionUntil == 0 || !hasTrustedClock()){
+      return true;
+    }
+
+    return (uint64_t)time(nullptr) <= authState.sessionUntil;
+  }
+
+  bool tokenValid(const String& token){
+    String clean = token;
+    clean.trim();
+    return clean.length() > 0 && hasActiveSession() && safeEquals(authState.sessionToken, clean);
+  }
+
+  String requestToken(AsyncWebServerRequest* req){
+    if(req->hasHeader("X-HelioSync-Session")){
+      return req->getHeader("X-HelioSync-Session")->value();
+    }
+
+    if(req->hasParam("token")){
+      return req->getParam("token")->value();
+    }
+
+    return "";
+  }
+
+  bool requestAuthenticated(AsyncWebServerRequest* req){
+    if(!authState.localAccountReady){
+      return true;
+    }
+
+    return tokenValid(requestToken(req));
+  }
+
+  void clearSession(){
+    prefs.begin("heliosync", false);
+    prefs.putString("auth_token", "");
+    prefs.putULong64("auth_until", 0);
+    prefs.end();
+
+    strlcpy(authState.sessionToken, "", sizeof(authState.sessionToken));
+    authState.sessionUntil = 0;
+  }
+
+  bool startSession(String& tokenOut){
+    tokenOut = randomHex(32);
+    authState.sessionUntil = nextSessionExpiry();
+    strlcpy(authState.sessionToken, tokenOut.c_str(), sizeof(authState.sessionToken));
+
+    prefs.begin("heliosync", false);
+    prefs.putString("auth_token", tokenOut);
+    prefs.putULong64("auth_until", authState.sessionUntil);
+    prefs.end();
+
+    return tokenOut.length() > 0;
+  }
+
+  bool saveLocalAccount(const String& username, const String& password, String& tokenOut){
+    String normalized = normalizeUsername(username);
+    if(normalized.length() < 3 || normalized.length() >= sizeof(authState.username) || password.length() < 8){
+      return false;
+    }
+
+    String salt = randomHex(16);
+    String hash = sha256Hex(salt + ":" + password);
+    if(salt.length() == 0 || hash.length() != 64){
+      return false;
+    }
+
+    prefs.begin("heliosync", false);
+    prefs.putString("auth_user", normalized);
+    prefs.putString("auth_salt", salt);
+    prefs.putString("auth_hash", hash);
+    prefs.end();
+
+    authState.localAccountReady = true;
+    strlcpy(authState.username, normalized.c_str(), sizeof(authState.username));
+    strlcpy(authState.passwordSalt, salt.c_str(), sizeof(authState.passwordSalt));
+    strlcpy(authState.passwordHash, hash.c_str(), sizeof(authState.passwordHash));
+
+    return startSession(tokenOut);
+  }
+
+  bool passwordMatches(const String& username, const String& password){
+    if(!authState.localAccountReady){
+      return false;
+    }
+
+    String normalized = normalizeUsername(username);
+    if(!safeEquals(authState.username, normalized)){
+      return false;
+    }
+
+    String hash = sha256Hex(String(authState.passwordSalt) + ":" + password);
+    return hash.length() == 64 && safeEquals(authState.passwordHash, hash);
+  }
+
+  String buildStatusJson(AsyncWebServerRequest* req, const String& token = ""){
+    StaticJsonDocument<512> doc;
+    bool authenticated = !authState.localAccountReady || token.length() > 0 || requestAuthenticated(req);
+
+    doc["local_account_ready"] = authState.localAccountReady;
+    doc["account_required"] = authState.localAccountReady;
+    doc["authenticated"] = authenticated;
+    doc["username"] = authState.username;
+    doc["session_days"] = 90;
+    if(authState.sessionUntil > 0){
+      doc["session_expires_at"] = authState.sessionUntil;
+    }
+    if(token.length() > 0){
+      doc["token"] = token;
+    }
+
+    String out;
+    serializeJson(doc, out);
+    return out;
+  }
+}
 
 // ============================================================
 //  SETUP DEL DISPOSITIVO — AP, WiFi externo y onboarding local
@@ -481,14 +1027,35 @@ namespace DeviceSetup {
   }
 
   bool firebaseAvailable(){
-    return strlen(Config::FIREBASE_API_KEY) > 10;
+    return strlen(Config::FIREBASE_API_KEY) > 10 && strlen(Config::FIREBASE_PROJECT_ID) > 0;
+  }
+
+  bool looksLikeEmail(const String& email){
+    int at = email.indexOf('@');
+    int dot = email.lastIndexOf('.');
+    return email.length() >= 6 && at > 0 && dot > at + 1 && dot < (int)email.length() - 1;
+  }
+
+  bool isIndoorMode(){
+    return strcmp(setupState.operationMode, "indoor") == 0;
+  }
+
+  bool modeIsValid(const String& mode){
+    return mode == "outdoor" || mode == "indoor";
   }
 
   void load(){
     prefs.begin("heliosync", true);
+    String mode = prefs.getString("op_mode", "outdoor");
+    if(!modeIsValid(mode)) mode = "outdoor";
+    copyTo(setupState.operationMode, sizeof(setupState.operationMode), mode);
+    copyTo(setupState.heltecPeerMac, sizeof(setupState.heltecPeerMac), prefs.getString("heltec_mac", "10:51:DB:52:8B:B4"));
+    setupState.operationConfigured = prefs.getBool("op_set", false);
+
     String ssid = prefs.getString("wifi_ssid", "");
     setupState.wifiConfigured = ssid.length() > 0;
     setupState.wifiVerified   = prefs.getBool("wifi_ok", false);
+    setupState.wifiSkipped    = prefs.getBool("wifi_skip", false);
     copyTo(setupState.wifiSsid, sizeof(setupState.wifiSsid), ssid);
     copyTo(setupState.wifiError, sizeof(setupState.wifiError), prefs.getString("wifi_err", ""));
 
@@ -502,6 +1069,7 @@ namespace DeviceSetup {
     setupState.locationSet    = prefs.getBool("loc_set", gps.set);
     setupState.setupComplete  = prefs.getBool("setup_done", false);
     copyTo(setupState.locationSource, sizeof(setupState.locationSource), prefs.getString("loc_source", "phone"));
+    powerState.smartSleep     = prefs.getBool("smart_sleep", false);
     prefs.end();
 
     if(!setupState.cloudAvailable && !setupState.cloudSkipped){
@@ -516,16 +1084,51 @@ namespace DeviceSetup {
     return password;
   }
 
+  void saveOperationMode(const String& mode, const String& heltecMac){
+    String nextMode = modeIsValid(mode) ? mode : "outdoor";
+    String nextMac = heltecMac;
+    nextMac.trim();
+    nextMac.toUpperCase();
+    if(nextMac.length() == 0){
+      nextMac = "10:51:DB:52:8B:B4";
+    }
+
+    prefs.begin("heliosync", false);
+    prefs.putString("op_mode", nextMode);
+    prefs.putString("heltec_mac", nextMac);
+    prefs.putBool("op_set", true);
+    prefs.end();
+
+    copyTo(setupState.operationMode, sizeof(setupState.operationMode), nextMode);
+    copyTo(setupState.heltecPeerMac, sizeof(setupState.heltecPeerMac), nextMac);
+    setupState.operationConfigured = true;
+    bridgeState.linkTestBusy = false;
+    bridgeState.linkTestOk = nextMode != "indoor";
+    bridgeState.initialBusy = false;
+    bridgeState.initialSent = false;
+    strlcpy(bridgeState.error, "", sizeof(bridgeState.error));
+    EspNowBridge::beginOrRefresh();
+  }
+
+  void saveSmartSleep(bool enabled){
+    powerState.smartSleep = enabled;
+    prefs.begin("heliosync", false);
+    prefs.putBool("smart_sleep", enabled);
+    prefs.end();
+  }
+
   void saveWifiSuccess(const String& ssid, const String& password){
     prefs.begin("heliosync", false);
     prefs.putString("wifi_ssid", ssid);
     prefs.putString("wifi_pass", password);
     prefs.putBool("wifi_ok", true);
+    prefs.putBool("wifi_skip", false);
     prefs.putString("wifi_err", "");
     prefs.end();
 
     setupState.wifiConfigured = true;
     setupState.wifiVerified = true;
+    setupState.wifiSkipped = false;
     setupState.wifiBusy = false;
     copyTo(setupState.wifiSsid, sizeof(setupState.wifiSsid), ssid);
     strlcpy(setupState.wifiError, "", sizeof(setupState.wifiError));
@@ -535,14 +1138,33 @@ namespace DeviceSetup {
     prefs.begin("heliosync", false);
     prefs.putString("wifi_ssid", ssid);
     prefs.putBool("wifi_ok", false);
+    prefs.putBool("wifi_skip", false);
     prefs.putString("wifi_err", error);
     prefs.end();
 
     setupState.wifiConfigured = ssid.length() > 0;
     setupState.wifiVerified = false;
+    setupState.wifiSkipped = false;
     setupState.wifiBusy = false;
     copyTo(setupState.wifiSsid, sizeof(setupState.wifiSsid), ssid);
     copyTo(setupState.wifiError, sizeof(setupState.wifiError), error);
+  }
+
+  void skipWifi(){
+    prefs.begin("heliosync", false);
+    prefs.putString("wifi_ssid", "");
+    prefs.putString("wifi_pass", "");
+    prefs.putBool("wifi_ok", false);
+    prefs.putBool("wifi_skip", true);
+    prefs.putString("wifi_err", "");
+    prefs.end();
+
+    setupState.wifiConfigured = false;
+    setupState.wifiVerified = false;
+    setupState.wifiSkipped = true;
+    setupState.wifiBusy = false;
+    strlcpy(setupState.wifiSsid, "", sizeof(setupState.wifiSsid));
+    strlcpy(setupState.wifiError, "", sizeof(setupState.wifiError));
   }
 
   void saveCloudSuccess(const String& email, const String& uid, const String& refreshToken){
@@ -574,12 +1196,27 @@ namespace DeviceSetup {
   void saveCloudFailure(const String& error){
     prefs.begin("heliosync", false);
     prefs.putBool("cloud_ok", false);
+    prefs.putBool("cloud_skip", true);
     prefs.putString("cloud_err", error);
     prefs.end();
 
     setupState.cloudReady = false;
+    setupState.cloudSkipped = true;
     setupState.cloudBusy = false;
     copyTo(setupState.cloudError, sizeof(setupState.cloudError), error);
+  }
+
+  void skipCloud(const String& note = ""){
+    prefs.begin("heliosync", false);
+    prefs.putBool("cloud_ok", false);
+    prefs.putBool("cloud_skip", true);
+    prefs.putString("cloud_err", note);
+    prefs.end();
+
+    setupState.cloudReady = false;
+    setupState.cloudSkipped = true;
+    setupState.cloudBusy = false;
+    copyTo(setupState.cloudError, sizeof(setupState.cloudError), note);
   }
 
   void saveLocation(double lat, double lon, int timezoneOffsetMin, const String& source){
@@ -614,9 +1251,15 @@ namespace DeviceSetup {
   }
 
   String buildStatusJson(){
-    StaticJsonDocument<1024> doc;
+    StaticJsonDocument<1900> doc;
     doc["setup_complete"] = setupState.setupComplete;
     doc["project"] = Config::PROJECT_NAME;
+
+    auto auth = doc.createNestedObject("auth");
+    auth["local_account_ready"] = authState.localAccountReady;
+    auth["account_required"] = authState.localAccountReady;
+    auth["username"] = authState.username;
+    auth["session_days"] = 90;
 
     auto ap = doc.createNestedObject("ap");
     ap["ssid"] = apSSID;
@@ -624,10 +1267,38 @@ namespace DeviceSetup {
     ap["ip"] = WiFi.softAPIP().toString();
     ap["active"] = apActive;
 
+    auto operation = doc.createNestedObject("operation");
+    operation["mode"] = setupState.operationMode;
+    operation["configured"] = setupState.operationConfigured;
+    operation["indoor"] = isIndoorMode();
+    operation["outdoor"] = !isIndoorMode();
+    operation["heltec_peer_mac"] = setupState.heltecPeerMac;
+    operation["espnow_channel"] = Config::AP_CHANNEL;
+
+    auto bridge = doc.createNestedObject("espnow");
+    bridge["ready"] = bridgeState.ready;
+    bridge["peer_configured"] = bridgeState.peerConfigured;
+    bridge["link_test_busy"] = bridgeState.linkTestBusy;
+    bridge["link_test_ok"] = bridgeState.linkTestOk;
+    bridge["initial_busy"] = bridgeState.initialBusy;
+    bridge["initial_sent"] = bridgeState.initialSent;
+    bridge["peer_mac"] = setupState.heltecPeerMac;
+    bridge["sent_ok"] = bridgeState.sentOk;
+    bridge["sent_fail"] = bridgeState.sentFail;
+    bridge["last_status"] = bridgeState.lastStatus;
+    bridge["error"] = bridgeState.error;
+
+    auto power = doc.createNestedObject("power");
+    power["smart_sleep"] = powerState.smartSleep;
+    power["timer_minutes"] = 60;
+    power["timer_wake"] = powerState.timerWake;
+    power["pending_sleep"] = powerState.pendingSleep;
+
     auto wifi = doc.createNestedObject("wifi");
     wifi["configured"] = setupState.wifiConfigured;
     wifi["verified"] = setupState.wifiVerified;
     wifi["busy"] = setupState.wifiBusy;
+    wifi["skipped"] = setupState.wifiSkipped;
     wifi["ssid"] = setupState.wifiSsid;
     wifi["error"] = setupState.wifiError;
 
@@ -663,9 +1334,41 @@ namespace DeviceSetup {
     serializeJson(doc, out);
     return out;
   }
+
+  void resetOnboarding(){
+    setupState.setupComplete = false;
+    prefs.begin("heliosync", false);
+    prefs.putBool("setup_done", false);
+    prefs.end();
+  }
+
+  void factoryReset(){
+    prefs.begin("heliosync", false);
+    prefs.clear();
+    prefs.end();
+
+    Storage::factoryReset();
+
+    setupState = DeviceSetupState();
+    setupState.cloudAvailable = firebaseAvailable();
+    setupState.cloudSkipped = !setupState.cloudAvailable;
+    authState = LocalAuthState();
+    bridgeState = BridgeState();
+    powerState = PowerState();
+    consent = Consent();
+    gps = GpsData();
+    solar = SolarPos();
+    alert = Alert();
+    pendingSetupJob = SETUP_JOB_NONE;
+    pendingWifiSsid = "";
+    pendingWifiPassword = "";
+    pendingAccountEmail = "";
+    pendingAccountPassword = "";
+  }
 }
 
 void stopAccessPoint(){
+  EspNowBridge::stop();
   if(apActive){
     dnsServer.stop();
     WiFi.softAPdisconnect(true);
@@ -676,10 +1379,11 @@ void stopAccessPoint(){
 void startAccessPoint(){
   stopAccessPoint();
   WiFi.disconnect(true);
-  WiFi.mode(WIFI_AP);
+  WiFi.mode(WIFI_AP_STA);
   WiFi.softAP(apSSID.c_str(), Config::AP_PASS, Config::AP_CHANNEL, 0, Config::AP_MAX_CONN);
   apActive = true;
   dnsServer.start(Config::DNS_PORT, "*", WiFi.softAPIP());
+  EspNowBridge::beginOrRefresh();
   Serial.printf("[WiFi]    AP: %s  IP: %s\n",
                 apSSID.c_str(), WiFi.softAPIP().toString().c_str());
 }
@@ -705,7 +1409,7 @@ String firebaseAuthRequest(const char* endpoint, const String& email, const Stri
   String url = String("https://identitytoolkit.googleapis.com/v1/") + endpoint + "?key=" + Config::FIREBASE_API_KEY;
 
   if(!http.begin(client, url)){
-    return "No se pudo iniciar conexión segura con Firebase.";
+    return "No pudimos conectar con la NUBE.";
   }
 
   http.addHeader("Content-Type", "application/json");
@@ -726,11 +1430,147 @@ String firebaseAuthRequest(const char* endpoint, const String& email, const Stri
   }
 
   DynamicJsonDocument errorDoc(1024);
-  String message = "Firebase no aceptó el registro.";
+  String message = "La NUBE no aceptó el registro.";
   if(!deserializeJson(errorDoc, response)){
     message = errorDoc["error"]["message"] | message;
   }
 
+  return message;
+}
+
+String cloudIsoNow(){
+  time_t now = time(nullptr);
+  if(now <= 1600000000){
+    return String("panel-boot-") + String(millis());
+  }
+
+  struct tm t;
+  gmtime_r(&now, &t);
+  char buf[28];
+  snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+           t.tm_year + 1900, t.tm_mon + 1, t.tm_mday, t.tm_hour, t.tm_min, t.tm_sec);
+  return String(buf);
+}
+
+void addFirestoreString(JsonObject fields, const char* key, const String& value){
+  fields.createNestedObject(key)["stringValue"] = value;
+}
+
+void addFirestoreBool(JsonObject fields, const char* key, bool value){
+  fields.createNestedObject(key)["booleanValue"] = value;
+}
+
+bool firestorePatchDocument(const String& path, const String& updateMask, const String& body, const String& idToken, String& error){
+  WiFiClientSecure client;
+  client.setInsecure();
+
+  HTTPClient http;
+  String url = String("https://firestore.googleapis.com/v1/projects/")
+    + Config::FIREBASE_PROJECT_ID
+    + "/databases/(default)/documents/"
+    + path
+    + "?key="
+    + Config::FIREBASE_API_KEY
+    + updateMask;
+
+  if(!http.begin(client, url)){
+    error = "No pudimos conectar con la NUBE.";
+    return false;
+  }
+
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", "Bearer " + idToken);
+  int code = http.PATCH(body);
+  String response = http.getString();
+  http.end();
+
+  if(code >= 200 && code < 300){
+    return true;
+  }
+
+  DynamicJsonDocument errorDoc(1024);
+  error = "La NUBE creó la cuenta, pero no pudimos preparar su espacio.";
+  if(!deserializeJson(errorDoc, response)){
+    error = errorDoc["error"]["message"] | error;
+  }
+  return false;
+}
+
+bool createCloudBootstrapDocuments(const String& uid, const String& email, const String& idToken, String& error){
+  if(uid.length() == 0 || idToken.length() == 0){
+    error = "La NUBE no terminó de crear la cuenta.";
+    return false;
+  }
+
+  String nowIso = cloudIsoNow();
+
+  {
+    DynamicJsonDocument profileDoc(1024);
+    JsonObject fields = profileDoc.createNestedObject("fields");
+    addFirestoreString(fields, "uid", uid);
+    addFirestoreString(fields, "displayName", "");
+    addFirestoreString(fields, "email", email);
+    addFirestoreString(fields, "provider", "password");
+    addFirestoreString(fields, "createdAt", nowIso);
+    addFirestoreString(fields, "updatedAt", nowIso);
+
+    String body;
+    serializeJson(profileDoc, body);
+    String mask = "&updateMask.fieldPaths=uid&updateMask.fieldPaths=displayName&updateMask.fieldPaths=email&updateMask.fieldPaths=provider&updateMask.fieldPaths=createdAt&updateMask.fieldPaths=updatedAt";
+    if(!firestorePatchDocument("users/" + uid, mask, body, idToken, error)){
+      return false;
+    }
+  }
+
+  {
+    DynamicJsonDocument setupDoc(1536);
+    JsonObject fields = setupDoc.createNestedObject("fields");
+    bool indoor = DeviceSetup::isIndoorMode();
+    addFirestoreString(fields, "uid", uid);
+    addFirestoreString(fields, "systemProfile", indoor ? "home" : "outdoor");
+    addFirestoreString(fields, "connectivityMode", indoor ? "connected" : "autonomous");
+    addFirestoreBool(fields, "syncEnabled", true);
+    addFirestoreString(fields, "operatingMode", "tracking");
+    addFirestoreBool(fields, "setupCompleted", false);
+    addFirestoreBool(fields, "onboardingCompleted", false);
+    addFirestoreString(fields, "createdAt", nowIso);
+    addFirestoreString(fields, "updatedAt", nowIso);
+
+    JsonObject locationFields = fields.createNestedObject("location").createNestedObject("mapValue").createNestedObject("fields");
+    addFirestoreString(locationFields, "source", "phone");
+    addFirestoreString(locationFields, "city", "");
+    addFirestoreString(locationFields, "region", "");
+    addFirestoreString(locationFields, "country", "");
+    addFirestoreString(locationFields, "timezone", "");
+    addFirestoreString(locationFields, "label", "");
+
+    String body;
+    serializeJson(setupDoc, body);
+    String mask = "&updateMask.fieldPaths=uid&updateMask.fieldPaths=location&updateMask.fieldPaths=systemProfile&updateMask.fieldPaths=connectivityMode&updateMask.fieldPaths=syncEnabled&updateMask.fieldPaths=operatingMode&updateMask.fieldPaths=setupCompleted&updateMask.fieldPaths=onboardingCompleted&updateMask.fieldPaths=createdAt&updateMask.fieldPaths=updatedAt";
+    if(!firestorePatchDocument("userSetups/" + uid, mask, body, idToken, error)){
+      return false;
+    }
+  }
+
+  return true;
+}
+
+String friendlyCloudError(const String& message){
+  if(message.indexOf("WEAK_PASSWORD") >= 0){
+    return "La contraseña necesita al menos 8 caracteres.";
+  }
+  if(message == "EMAIL_EXISTS"){
+    return "Ese correo ya existe en la NUBE.";
+  }
+  if(message.indexOf("INVALID_PASSWORD") >= 0 || message.indexOf("EMAIL_NOT_FOUND") >= 0 || message.indexOf("INVALID_LOGIN_CREDENTIALS") >= 0){
+    return "El correo o la contraseña no coinciden con la cuenta de la NUBE.";
+  }
+  if(message.indexOf("TOO_MANY") >= 0){
+    return "Hubo demasiados intentos. Inténtalo de nuevo en unos minutos.";
+  }
+  if(message.indexOf("Firebase") >= 0 || message.indexOf("UID") >= 0){
+    return "La NUBE no terminó el registro. Puedes continuar con el acceso del panel.";
+  }
   return message;
 }
 
@@ -766,7 +1606,7 @@ void runFirebaseAccountJob(){
   setupState.cloudAvailable = DeviceSetup::firebaseAvailable();
 
   if(!setupState.cloudAvailable){
-    DeviceSetup::saveCloudFailure("Firebase no está configurado en este firmware.");
+    DeviceSetup::saveCloudFailure("La NUBE no está disponible en este panel.");
     pendingAccountEmail = "";
     pendingAccountPassword = "";
     startAccessPoint();
@@ -776,7 +1616,7 @@ void runFirebaseAccountJob(){
   String ssid = setupState.wifiSsid;
   String wifiPassword = DeviceSetup::getStoredWifiPassword();
   if(!setupState.wifiVerified || ssid.length() == 0){
-    DeviceSetup::saveCloudFailure("Primero verifica el WiFi de casa.");
+    DeviceSetup::saveCloudFailure("Primero verifica el internet de casa.");
     pendingAccountEmail = "";
     pendingAccountPassword = "";
     startAccessPoint();
@@ -788,7 +1628,7 @@ void runFirebaseAccountJob(){
   delay(350);
 
   if(!connectExternalWifi(ssid, wifiPassword, Config::WIFI_TEST_MS)){
-    DeviceSetup::saveCloudFailure("No pudimos salir a internet con el WiFi guardado.");
+    DeviceSetup::saveCloudFailure("No pudimos usar el internet guardado.");
     pendingAccountEmail = "";
     pendingAccountPassword = "";
     startAccessPoint();
@@ -806,23 +1646,126 @@ void runFirebaseAccountJob(){
     DynamicJsonDocument doc(4096);
     DeserializationError err = deserializeJson(doc, response);
     if(err){
-      DeviceSetup::saveCloudFailure("Firebase respondió, pero no pudimos leer la sesión.");
+      DeviceSetup::saveCloudFailure("La NUBE respondió, pero no pudimos terminar el registro.");
     } else {
       String uid = doc["localId"] | "";
+      String idToken = doc["idToken"] | "";
       String refreshToken = doc["refreshToken"] | "";
       if(uid.length() > 0){
-        DeviceSetup::saveCloudSuccess(pendingAccountEmail, uid, refreshToken);
+        String cloudError;
+        if(createCloudBootstrapDocuments(uid, pendingAccountEmail, idToken, cloudError)){
+          DeviceSetup::saveCloudSuccess(pendingAccountEmail, uid, refreshToken);
+        } else {
+          DeviceSetup::saveCloudFailure(cloudError);
+        }
       } else {
-        DeviceSetup::saveCloudFailure("Firebase no devolvió UID de usuario.");
+        DeviceSetup::saveCloudFailure("La NUBE no terminó de crear la cuenta.");
       }
     }
   } else {
-    DeviceSetup::saveCloudFailure(response);
+    DeviceSetup::saveCloudFailure(friendlyCloudError(response));
   }
 
   WiFi.disconnect(true);
   pendingAccountEmail = "";
   pendingAccountPassword = "";
+  startAccessPoint();
+}
+
+void runIndoorLinkTestJob(){
+  if(!DeviceSetup::isIndoorMode()){
+    bridgeState.linkTestBusy = false;
+    bridgeState.linkTestOk = true;
+    bridgeState.initialBusy = false;
+    bridgeState.initialSent = true;
+    return;
+  }
+
+  Serial.println("[INDOOR] Probando tarjeta de pared");
+  bridgeState.linkTestBusy = true;
+  bridgeState.linkTestOk = false;
+  bridgeState.initialBusy = true;
+  bridgeState.initialSent = false;
+  strlcpy(bridgeState.error, "", sizeof(bridgeState.error));
+
+  stopAccessPoint();
+  delay(350);
+
+  WiFi.disconnect(true, true);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  delay(220);
+
+  readAllSensors();
+  recalcSolar();
+  updateAlert();
+
+  bool dataOk = EspNowBridge::sendLatestWithRetries(8, 900UL);
+  bridgeState.initialSent = dataOk;
+  delay(180);
+
+  bool textOk = false;
+  if(dataOk){
+    textOk = EspNowBridge::sendTextWithRetries(EspNowBridge::LINK_TEST_MESSAGE, 5, 850UL);
+  }
+
+  bool ok = dataOk && textOk;
+  bridgeState.linkTestOk = ok;
+  bridgeState.linkTestBusy = false;
+  bridgeState.initialBusy = false;
+
+  if(ok){
+    Serial.println("[INDOOR] Tarjeta de pared confirmada con lectura inicial");
+  } else if(!dataOk){
+    strlcpy(bridgeState.error, "La tarjeta de pared no recibió la primera lectura. Revisa que esté encendida y que el código sea correcto.", sizeof(bridgeState.error));
+  } else if(strlen(bridgeState.error) == 0){
+    strlcpy(bridgeState.error, "La tarjeta de pared no respondió. Revisa que esté encendida y que el código sea correcto.", sizeof(bridgeState.error));
+  }
+
+  delay(220);
+  WiFi.disconnect(true, true);
+  startAccessPoint();
+}
+
+void runIndoorInitialBridgeJob(){
+  if(!DeviceSetup::isIndoorMode()){
+    bridgeState.initialBusy = false;
+    bridgeState.initialSent = true;
+    return;
+  }
+
+  Serial.println("[INDOOR] Enviando lectura inicial a Heltec A");
+  bridgeState.initialBusy = true;
+  bridgeState.initialSent = false;
+
+  stopAccessPoint();
+  delay(350);
+
+  WiFi.disconnect(true, true);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  esp_wifi_set_ps(WIFI_PS_NONE);
+  delay(200);
+
+  readAllSensors();
+  recalcSolar();
+  updateAlert();
+
+  bridgeState.initialSent = EspNowBridge::sendLatestWithRetries(6, 900UL);
+  bridgeState.initialBusy = false;
+
+  if(bridgeState.initialSent){
+    Serial.println("[INDOOR] Lectura inicial confirmada por Heltec A");
+  } else {
+    Serial.println("[INDOOR] No hubo confirmación de Heltec A");
+    if(strlen(bridgeState.error) == 0){
+      strlcpy(bridgeState.error, "No recibimos confirmación de la tarjeta de pared. Revisa que esté encendida y usa el código que muestra su pantalla.", sizeof(bridgeState.error));
+    }
+  }
+
+  delay(200);
+  WiFi.disconnect(true, true);
   startAccessPoint();
 }
 
@@ -838,6 +1781,10 @@ void runPendingSetupJob(){
     runWifiVerificationJob();
   } else if(job == SETUP_JOB_FIREBASE_ACCOUNT){
     runFirebaseAccountJob();
+  } else if(job == SETUP_JOB_INDOOR_LINK_TEST){
+    runIndoorLinkTestJob();
+  } else if(job == SETUP_JOB_INDOOR_INITIAL_SEND){
+    runIndoorInitialBridgeJob();
   }
 }
 
@@ -912,14 +1859,7 @@ void applyBrowserTelemetry(JsonVariantConst msg){
   }
 
   double epochMsDouble = msg["epoch_ms"] | 0.0;
-  if(epochMsDouble > 1600000000000.0){
-    uint64_t epochMs = (uint64_t)epochMsDouble;
-    struct timeval tv;
-    tv.tv_sec = (time_t)(epochMs / 1000ULL);
-    tv.tv_usec = (suseconds_t)((epochMs % 1000ULL) * 1000ULL);
-    settimeofday(&tv, nullptr);
-    ntpOk = true;
-  }
+  applyEpochMs(epochMsDouble);
 
   if(msg.containsKey("lat") && msg.containsKey("lon")){
     DeviceSetup::saveLocation(
@@ -938,7 +1878,7 @@ void applyBrowserTelemetry(JsonVariantConst msg){
 //  CONSTRUIR PAYLOAD WEBSOCKET
 // ============================================================
 String buildPayload(){
-  StaticJsonDocument<1800> doc;
+  StaticJsonDocument<2200> doc;
   doc["seq"] = ++seq;
 
   struct tm t;
@@ -1048,6 +1988,17 @@ String buildPayload(){
   diag["ws_clients"] = ws.count();
   diag["ap_ssid"]    = apSSID;
 
+  auto network = doc.createNestedObject("network");
+  network["mode"] = setupState.operationMode;
+  network["transport"] = DeviceSetup::isIndoorMode() ? "espnow_lora" : "littlefs_local";
+  network["espnow_ready"] = bridgeState.ready;
+  network["espnow_status"] = bridgeState.lastStatus;
+  network["heltec_peer_mac"] = setupState.heltecPeerMac;
+
+  auto power = doc.createNestedObject("power");
+  power["smart_sleep"] = powerState.smartSleep;
+  power["timer_minutes"] = 60;
+
   String out; serializeJson(doc,out); return out;
 }
 
@@ -1073,6 +2024,61 @@ void storeHourlyReading(){
   e.alertWas = alert.active;
 
   Storage::saveReading(e);
+  if(DeviceSetup::isIndoorMode()){
+    EspNowBridge::sendLatestWithRetries(3, 700UL);
+  }
+}
+
+// ============================================================
+//  POWER — sueño inteligente con despertar cada 60 min
+// ============================================================
+namespace Power {
+  void scheduleSmartSleep(unsigned long delayMs = 900UL){
+    DeviceSetup::saveSmartSleep(true);
+    powerState.pendingSleep = true;
+    powerState.sleepAt = millis() + delayMs;
+  }
+
+  void captureBeforeSleep(){
+    readAllSensors();
+    recalcSolar();
+    updateAlert();
+    storeHourlyReading();
+
+    if(!ntpOk && DeviceSetup::isIndoorMode()){
+      EspNowBridge::sendLatestWithRetries(3, 700UL);
+    }
+  }
+
+  void enterDeepSleep(){
+    Serial.println("[POWER] Entrando en sueño inteligente por 60 min");
+    captureBeforeSleep();
+    delay(150);
+
+    ws.closeAll();
+    dnsServer.stop();
+    EspNowBridge::stop();
+    WiFi.softAPdisconnect(true);
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_OFF);
+
+    esp_sleep_enable_timer_wakeup(Config::SMART_SLEEP_US);
+    delay(150);
+    esp_deep_sleep_start();
+  }
+
+  void loop(){
+    unsigned long now = millis();
+
+    if(powerState.pendingSleep && now >= powerState.sleepAt){
+      powerState.pendingSleep = false;
+      enterDeepSleep();
+    }
+
+    if(powerState.smartSleep && powerState.timerWake && now >= Config::TIMER_WAKE_WINDOW_MS && ws.count() == 0 && pendingSetupJob == SETUP_JOB_NONE){
+      enterDeepSleep();
+    }
+  }
 }
 
 // ============================================================
@@ -1131,6 +2137,15 @@ void sendResponse(AsyncWebServerRequest* req, int code, const char* contentType,
 
 void sendJson(AsyncWebServerRequest* req, int code, const String& body){
   sendResponse(req, code, "application/json", body);
+}
+
+bool requireDeviceAuth(AsyncWebServerRequest* req){
+  if(DeviceAuth::requestAuthenticated(req)){
+    return true;
+  }
+
+  sendJson(req, 401, "{\"error\":\"Inicia sesión en el panel HelioSync\"}");
+  return false;
 }
 
 void sendOptions(AsyncWebServerRequest* req){
@@ -1284,10 +2299,96 @@ void setupRoutes(){
     WebApp::sendShell(req);
   });
 
+  // ── Sesión local del portal ESP32 ─────────────────────────
+  server.on("/api/auth/status", HTTP_GET, [](AsyncWebServerRequest* req){
+    sendJson(req, 200, DeviceAuth::buildStatusJson(req));
+  });
+
+  server.on("/api/auth/login", HTTP_POST,
+    [](AsyncWebServerRequest* req){
+      if(req->contentLength() == 0) sendJson(req, 400, "{\"error\":\"Body requerido\"}");
+    },
+    nullptr,
+    [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t){
+      StaticJsonDocument<320> doc;
+      if(deserializeJson(doc, data, len)){
+        sendJson(req, 400, "{\"error\":\"JSON inválido\"}");
+        return;
+      }
+
+      applyEpochMs(doc["epoch_ms"] | 0.0);
+
+      String username = doc["username"] | "";
+      String password = doc["password"] | "";
+      if(!DeviceAuth::passwordMatches(username, password)){
+        sendJson(req, 401, "{\"error\":\"Usuario o contraseña incorrectos\"}");
+        return;
+      }
+
+      String token;
+      DeviceAuth::startSession(token);
+      sendJson(req, 200, DeviceAuth::buildStatusJson(req, token));
+    }
+  );
+
+  server.on("/api/auth/logout", HTTP_POST,
+    [](AsyncWebServerRequest* req){},
+    nullptr,
+    [](AsyncWebServerRequest* req, uint8_t*, size_t, size_t, size_t){
+      DeviceAuth::clearSession();
+      sendJson(req, 200, DeviceAuth::buildStatusJson(req));
+    }
+  );
+
   // ── Onboarding local del dispositivo ─────────────────────
   server.on("/api/setup/status", HTTP_GET, [](AsyncWebServerRequest* req){
+    if(!requireDeviceAuth(req)) return;
+
     sendJson(req, 200, DeviceSetup::buildStatusJson());
   });
+
+  server.on("/api/setup/mode", HTTP_POST,
+    [](AsyncWebServerRequest* req){
+      if(req->contentLength() == 0) sendJson(req, 400, "{\"error\":\"Body requerido\"}");
+    },
+    nullptr,
+    [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t){
+      if(!requireDeviceAuth(req)) return;
+
+      StaticJsonDocument<192> doc;
+      if(deserializeJson(doc, data, len)){
+        sendJson(req, 400, "{\"error\":\"JSON inválido\"}");
+        return;
+      }
+
+      String mode = doc["mode"] | "outdoor";
+      String heltecMac = doc["heltec_mac"] | setupState.heltecPeerMac;
+      mode.trim();
+      mode.toLowerCase();
+      heltecMac.trim();
+      heltecMac.toUpperCase();
+
+      if(!DeviceSetup::modeIsValid(mode)){
+        sendJson(req, 400, "{\"error\":\"Elige campamento o casa\"}");
+        return;
+      }
+
+      if(mode == "indoor" && !EspNowBridge::macLooksValid(heltecMac)){
+        sendJson(req, 400, "{\"error\":\"Revisa el código de la tarjeta de pared. Escríbelo tal como aparece en su pantalla\"}");
+        return;
+      }
+
+	      DeviceSetup::saveOperationMode(mode, heltecMac);
+	      if(mode == "indoor"){
+	        bridgeState.linkTestBusy = true;
+	        bridgeState.linkTestOk = false;
+	        strlcpy(bridgeState.error, "", sizeof(bridgeState.error));
+	        pendingSetupJob = SETUP_JOB_INDOOR_LINK_TEST;
+	        pendingSetupJobAt = millis() + 650;
+	      }
+	      sendJson(req, 200, DeviceSetup::buildStatusJson());
+	    }
+	  );
 
   server.on("/api/setup/wifi", HTTP_POST,
     [](AsyncWebServerRequest* req){
@@ -1295,6 +2396,8 @@ void setupRoutes(){
     },
     nullptr,
     [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t){
+      if(!requireDeviceAuth(req)) return;
+
       StaticJsonDocument<256> doc;
       if(deserializeJson(doc, data, len)){
         sendJson(req, 400, "{\"error\":\"JSON inválido\"}");
@@ -1321,13 +2424,27 @@ void setupRoutes(){
     }
   );
 
+  server.on("/api/setup/offline", HTTP_POST,
+    [](AsyncWebServerRequest* req){},
+    nullptr,
+    [](AsyncWebServerRequest* req, uint8_t*, size_t, size_t, size_t){
+      if(!requireDeviceAuth(req)) return;
+
+      DeviceSetup::skipWifi();
+      DeviceSetup::skipCloud();
+      sendJson(req, 200, DeviceSetup::buildStatusJson());
+    }
+  );
+
   server.on("/api/setup/account", HTTP_POST,
     [](AsyncWebServerRequest* req){
       if(req->contentLength() == 0) sendJson(req, 400, "{\"error\":\"Body requerido\"}");
     },
     nullptr,
     [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t){
-      StaticJsonDocument<320> doc;
+      if(!requireDeviceAuth(req)) return;
+
+      StaticJsonDocument<384> doc;
       if(deserializeJson(doc, data, len)){
         sendJson(req, 400, "{\"error\":\"JSON inválido\"}");
         return;
@@ -1336,19 +2453,42 @@ void setupRoutes(){
       String email = doc["email"] | "";
       String password = doc["password"] | "";
       email.trim();
+      applyEpochMs(doc["epoch_ms"] | 0.0);
 
-      if(!DeviceSetup::firebaseAvailable()){
-        sendJson(req, 409, "{\"error\":\"Firebase no está configurado en este firmware\"}");
+      setupState.cloudAvailable = DeviceSetup::firebaseAvailable();
+      bool syncCloud = doc["sync_cloud"] | setupState.cloudAvailable;
+      if(setupState.cloudAvailable && syncCloud && !setupState.wifiVerified){
+        sendJson(req, 409, "{\"error\":\"Primero verifica el internet de casa\"}");
         return;
       }
 
-      if(!setupState.wifiVerified){
-        sendJson(req, 409, "{\"error\":\"Primero verifica el WiFi de casa\"}");
+      if(!DeviceSetup::looksLikeEmail(email) || password.length() < 8){
+        sendJson(req, 400, "{\"error\":\"Usa un correo válido y una contraseña de al menos 8 caracteres\"}");
         return;
       }
 
-      if(email.length() < 5 || password.length() < 8){
-        sendJson(req, 400, "{\"error\":\"Correo o contraseña inválidos\"}");
+      String token;
+      if(!DeviceAuth::saveLocalAccount(email, password, token)){
+        sendJson(req, 500, "{\"error\":\"No pudimos guardar el acceso local\"}");
+        return;
+      }
+
+      StaticJsonDocument<512> response;
+      response["ok"] = true;
+      response["token"] = token;
+      auto auth = response.createNestedObject("auth");
+      auth["local_account_ready"] = true;
+      auth["account_required"] = true;
+      auth["authenticated"] = true;
+      auth["username"] = authState.username;
+      auth["session_days"] = 90;
+
+      if(!setupState.cloudAvailable || !syncCloud){
+        DeviceSetup::skipCloud();
+        response["reconnect"] = false;
+        String out;
+        serializeJson(response, out);
+        sendJson(req, 200, out);
         return;
       }
 
@@ -1357,9 +2497,13 @@ void setupRoutes(){
       pendingSetupJob = SETUP_JOB_FIREBASE_ACCOUNT;
       pendingSetupJobAt = millis() + 650;
       setupState.cloudBusy = true;
+      setupState.cloudSkipped = false;
       strlcpy(setupState.cloudError, "", sizeof(setupState.cloudError));
 
-      sendJson(req, 202, "{\"ok\":true,\"reconnect\":true}");
+      response["reconnect"] = true;
+      String out;
+      serializeJson(response, out);
+      sendJson(req, 202, out);
     }
   );
 
@@ -1369,6 +2513,8 @@ void setupRoutes(){
     },
     nullptr,
     [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t){
+      if(!requireDeviceAuth(req)) return;
+
       StaticJsonDocument<256> doc;
       if(deserializeJson(doc, data, len)){
         sendJson(req, 400, "{\"error\":\"JSON inválido\"}");
@@ -1380,14 +2526,7 @@ void setupRoutes(){
       }
 
       double epochMsDouble = doc["epoch_ms"] | 0.0;
-      if(epochMsDouble > 1600000000000.0){
-        uint64_t epochMs = (uint64_t)epochMsDouble;
-        struct timeval tv;
-        tv.tv_sec = (time_t)(epochMs / 1000ULL);
-        tv.tv_usec = (suseconds_t)((epochMs % 1000ULL) * 1000ULL);
-        settimeofday(&tv, nullptr);
-        ntpOk = true;
-      }
+      applyEpochMs(epochMsDouble);
 
       double lat = doc["lat"] | 999.0;
       double lon = doc["lon"] | 999.0;
@@ -1410,13 +2549,62 @@ void setupRoutes(){
     [](AsyncWebServerRequest* req){},
     nullptr,
     [](AsyncWebServerRequest* req, uint8_t*, size_t, size_t, size_t){
+      if(!requireDeviceAuth(req)) return;
+
       DeviceSetup::markComplete(true);
+      if(DeviceSetup::isIndoorMode()){
+        bridgeState.initialBusy = true;
+        bridgeState.initialSent = false;
+        strlcpy(bridgeState.error, "", sizeof(bridgeState.error));
+        pendingSetupJob = SETUP_JOB_INDOOR_INITIAL_SEND;
+        pendingSetupJobAt = millis() + 650;
+      }
       sendJson(req, 200, DeviceSetup::buildStatusJson());
+    }
+  );
+
+  server.on("/api/setup/reset", HTTP_POST,
+    [](AsyncWebServerRequest* req){},
+    nullptr,
+    [](AsyncWebServerRequest* req, uint8_t*, size_t, size_t, size_t){
+      if(!requireDeviceAuth(req)) return;
+
+      DeviceSetup::resetOnboarding();
+      sendJson(req, 200, DeviceSetup::buildStatusJson());
+    }
+  );
+
+  server.on("/api/setup/factory-reset", HTTP_POST,
+    [](AsyncWebServerRequest* req){},
+    nullptr,
+    [](AsyncWebServerRequest* req, uint8_t*, size_t, size_t, size_t){
+      if(!authState.localAccountReady){
+        sendJson(req, 403, "{\"error\":\"Primero termina el registro e inicia sesión antes de borrar datos\"}");
+        return;
+      }
+
+      if(!requireDeviceAuth(req)) return;
+
+      DeviceSetup::factoryReset();
+      sendJson(req, 200, DeviceSetup::buildStatusJson());
+    }
+  );
+
+  server.on("/api/power/sleep", HTTP_POST,
+    [](AsyncWebServerRequest* req){},
+    nullptr,
+    [](AsyncWebServerRequest* req, uint8_t*, size_t, size_t, size_t){
+      if(!requireDeviceAuth(req)) return;
+
+      Power::scheduleSmartSleep();
+      sendJson(req, 200, "{\"ok\":true,\"message\":\"HelioSync entrará en sueño inteligente y despertará cada 60 minutos.\"}");
     }
   );
 
   // ── GET /diagnostics — Dashboard técnico del nodo ────────
   server.on("/diagnostics", HTTP_GET, [](AsyncWebServerRequest* req){
+    if(!requireDeviceAuth(req)) return;
+
     String html =
       "<!DOCTYPE html><html><head>"
       "<meta charset='utf-8'><title>HelioSync</title>"
@@ -1459,6 +2647,8 @@ void setupRoutes(){
     },
     nullptr,
     [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t){
+      if(!requireDeviceAuth(req)) return;
+
       StaticJsonDocument<192> doc;
       if(!deserializeJson(doc,data,len)){
         if(doc.containsKey("lat")&&doc.containsKey("lon")){
@@ -1471,26 +2661,36 @@ void setupRoutes(){
 
   // ── GET /data — snapshot actual ──────────────────────────
   server.on("/data", HTTP_GET, [](AsyncWebServerRequest* req){
+    if(!requireDeviceAuth(req)) return;
+
     sendJson(req, 200, buildPayload());
   });
 
   // Alias pensado para clientes web existentes
   server.on("/api/heliosync/latest", HTTP_GET, [](AsyncWebServerRequest* req){
+    if(!requireDeviceAuth(req)) return;
+
     sendJson(req, 200, buildPayload());
   });
 
   // ── GET /history — lista de días disponibles ─────────────
   server.on("/history", HTTP_GET, [](AsyncWebServerRequest* req){
+    if(!requireDeviceAuth(req)) return;
+
     sendJson(req, 200, Storage::listDays());
   });
 
   server.on("/api/heliosync/history", HTTP_GET, [](AsyncWebServerRequest* req){
+    if(!requireDeviceAuth(req)) return;
+
     sendJson(req, 200, buildTodayHistoryJson());
   });
 
   // ── GET /history?date=YYYY-MM-DD — lecturas de un día ────
   // Retorna JSONL: cada línea es un objeto JSON (formato Firebase-ready)
   server.on("/history/day", HTTP_GET, [](AsyncWebServerRequest* req){
+    if(!requireDeviceAuth(req)) return;
+
     if(!req->hasParam("date")){
       sendJson(req, 400, "{\"error\":\"Falta param date\"}");
       return;
@@ -1510,6 +2710,8 @@ void setupRoutes(){
 
   // ── GET /fs — estadísticas del sistema de archivos ───────
   server.on("/fs", HTTP_GET, [](AsyncWebServerRequest* req){
+    if(!requireDeviceAuth(req)) return;
+
     StaticJsonDocument<128> doc;
     doc["total_kb"]   = (int)(LittleFS.totalBytes()/1024);
     doc["used_kb"]    = (int)(LittleFS.usedBytes()/1024);
@@ -1527,6 +2729,8 @@ void setupRoutes(){
     },
     nullptr,
     [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t){
+      if(!requireDeviceAuth(req)) return;
+
       StaticJsonDocument<128> doc;
       if(!deserializeJson(doc,data,len)){
         consent.given     = doc["consent"]   | false;
@@ -1544,11 +2748,19 @@ void setupRoutes(){
   server.on("/history", HTTP_OPTIONS, sendOptions);
   server.on("/history/day", HTTP_OPTIONS, sendOptions);
   server.on("/fs", HTTP_OPTIONS, sendOptions);
+  server.on("/api/auth/status", HTTP_OPTIONS, sendOptions);
+  server.on("/api/auth/login", HTTP_OPTIONS, sendOptions);
+  server.on("/api/auth/logout", HTTP_OPTIONS, sendOptions);
   server.on("/api/setup/status", HTTP_OPTIONS, sendOptions);
+  server.on("/api/setup/mode", HTTP_OPTIONS, sendOptions);
   server.on("/api/setup/wifi", HTTP_OPTIONS, sendOptions);
+  server.on("/api/setup/offline", HTTP_OPTIONS, sendOptions);
   server.on("/api/setup/account", HTTP_OPTIONS, sendOptions);
   server.on("/api/setup/location", HTTP_OPTIONS, sendOptions);
   server.on("/api/setup/complete", HTTP_OPTIONS, sendOptions);
+  server.on("/api/setup/reset", HTTP_OPTIONS, sendOptions);
+  server.on("/api/setup/factory-reset", HTTP_OPTIONS, sendOptions);
+  server.on("/api/power/sleep", HTTP_OPTIONS, sendOptions);
   server.on("/api/heliosync/latest", HTTP_OPTIONS, sendOptions);
   server.on("/api/heliosync/history", HTTP_OPTIONS, sendOptions);
 
@@ -1577,7 +2789,7 @@ void setupRoutes(){
   // CORS global — necesario para la PWA en desarrollo
   DefaultHeaders::Instance().addHeader("Access-Control-Allow-Origin",  "*");
   DefaultHeaders::Instance().addHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Origin");
+  DefaultHeaders::Instance().addHeader("Access-Control-Allow-Headers", "Content-Type, Accept, Origin, X-HelioSync-Session");
   DefaultHeaders::Instance().addHeader("Access-Control-Allow-Private-Network", "true");
 }
 
@@ -1590,6 +2802,11 @@ void setup(){
   Serial.println("\n╔══════════════════════════╗");
   Serial.println("║   HelioSync v3.0         ║");
   Serial.println("╚══════════════════════════╝");
+  powerState.wakeCause = esp_sleep_get_wakeup_cause();
+  powerState.timerWake = powerState.wakeCause == ESP_SLEEP_WAKEUP_TIMER;
+  if(powerState.timerWake){
+    Serial.println("[POWER] Despertó por temporizador de 60 min");
+  }
 
   // ── I2C ──────────────────────────────────────────────────
   Wire.begin(Config::SDA_PIN, Config::SCL_PIN);
@@ -1644,6 +2861,7 @@ void setup(){
     Serial.println("[GPS]     Pendiente — la PWA debe enviarlo");
 
   DeviceSetup::load();
+  DeviceAuth::load();
 
   // ── WiFi AP ───────────────────────────────────────────────
   uint8_t mac[6]; WiFi.macAddress(mac);
@@ -1721,6 +2939,8 @@ void loop(){
     }
   }
 
+  Power::loop();
+
   delay(1000);   // DHT22 necesita mínimo 1s entre lecturas
 }
 
@@ -1735,8 +2955,8 @@ void loop(){
  *  2. El DNS cautivo redirige el teléfono a /setup.
  *  3. /api/setup/wifi recibe SSID/password, apaga AP, prueba WiFi
  *     externo, guarda credenciales si funcionan y vuelve a abrir AP.
- *  4. Si HELIOSYNC_FIREBASE_API_KEY está definido, /api/setup/account
- *     usa Firebase Auth REST desde el ESP32. Si no, el onboarding omite nube.
+ *  4. /api/setup/account siempre crea una cuenta local en el ESP32.
+ *     Si HELIOSYNC_FIREBASE_API_KEY está definido, también intenta Firebase Auth.
  *  5. /api/setup/location guarda lat/lon solo en NVS local para el
  *     cálculo solar. No se sube a la nube.
  *  6. El dashboard corre desde el ESP32 sin Node.js, laptop ni servidor.
@@ -1752,7 +2972,10 @@ void loop(){
  *   GET  /diagnostics→ Diagnóstico técnico
  *   GET  /api/setup/status
  *   POST /api/setup/wifi      → { ssid, password }
- *   POST /api/setup/account   → { email, password } si Firebase está activo
+ *   GET  /api/auth/status
+ *   POST /api/auth/login     → { username, password, epoch_ms }
+ *   POST /api/auth/logout
+ *   POST /api/setup/account  → { email, password, epoch_ms }
  *   POST /api/setup/location  → { lat, lon, epoch_ms, timezone_offset_min }
  *   POST /api/setup/complete
  *   GET  /data        → Snapshot JSON actual

@@ -24,6 +24,8 @@ const STATUS_META = {
   },
 };
 
+const EMPTY_VALUE = '—';
+
 function clamp(value, min, max) {
   return Math.min(Math.max(value, min), max);
 }
@@ -330,8 +332,82 @@ export function formatRelativeUpdate(lastUpdatedAt, locale, t, referenceTime = D
   return t('insights.updatedHoursAgo', { value: formatNumber(diffHours, locale, 0) });
 }
 
-export function getDashboardInsights(data, status, history, userSetup, locale, t) {
+export function getDashboardInsights(data, status, history, userSetup, locale, t, hasLiveTelemetry = true) {
   const context = getContext(userSetup, status);
+
+  if (!hasLiveTelemetry) {
+    const outputState = {
+      label: t('insights.waitingForTelemetry'),
+      symbol: '→',
+      tone: 'neutral',
+      reason: t('insights.waitingForTelemetryReason'),
+      ratio: 0,
+      expected: 0,
+    };
+    const systemState = {
+      label: t('insights.statusWaiting'),
+      tone: 'neutral',
+      reason: t('insights.waitingForTelemetryReason'),
+    };
+    const deviceState = {
+      label: t('insights.deviceWaiting'),
+      tone: 'neutral',
+      reason: t('insights.deviceWaitingReason'),
+    };
+
+    return {
+      outputState,
+      systemState,
+      trend: {
+        direction: t('insights.steady'),
+        detail: t('insights.waitingTrendReason'),
+      },
+      deviceState,
+      supportMetrics: [
+        {
+          label: t('insights.voltage'),
+          value: EMPTY_VALUE,
+        },
+        {
+          label: t('insights.current'),
+          value: EMPTY_VALUE,
+        },
+        {
+          label: t('dashboard.deviceState'),
+          value: deviceState.label,
+        },
+      ],
+      environment: [
+        {
+          key: 'sunlight',
+          label: t('insights.sunlight'),
+          value: EMPTY_VALUE,
+          meaning: t('insights.waitingReading'),
+        },
+        {
+          key: 'temperature',
+          label: t('insights.temperature'),
+          value: EMPTY_VALUE,
+          meaning: t('insights.waitingReading'),
+        },
+        {
+          key: 'humidity',
+          label: t('insights.humidity'),
+          value: EMPTY_VALUE,
+          meaning: t('insights.waitingReading'),
+        },
+      ],
+      connectionLabel: t('insights.waitingLink'),
+      connectivityModeLabel: getConnectivityModeLabel(context, t),
+      profileLabel: getProfileLabel(context, t),
+      profileMessage: getProfileMessage(context, t),
+      locationLabel: data.meta.location || t('insights.waitingLocation'),
+      modeLabel: t('insights.waitingForTelemetry'),
+      trackingLabel: t('insights.waitingForTelemetry'),
+      syncLabel: t('insights.waitingLink'),
+    };
+  }
+
   const outputState = getOutputState(data.electrical.power_w, data.environment.lux_bh1750, t);
   const systemState = getSystemState(status, data.panel, data.environment, outputState, context, t);
   const trend = getTrendSummary(history, data.simHour, data.electrical.power_w, locale, t);

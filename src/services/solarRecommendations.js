@@ -16,30 +16,17 @@ const COPY = {
     trackingDetail: 'El sistema usa tu ubicación para estimar amanecer, atardecer y el arco solar del día, y hace ajustes suaves de alineación en lugar de depender solo de una orientación fija.',
     trackingAxisNote: 'Alineación recomendada del eje: norte-sur. Así el panel puede seguir la trayectoria este-oeste con un movimiento simple y estable.',
   },
-  en: {
-    yourSite: 'your site',
-    trueSouth: 'true south',
-    trueNorth: 'true north',
-    northSunPath: 'The sun crosses the southern side of the sky at your latitude.',
-    southSunPath: 'The sun crosses the northern side of the sky at your latitude.',
-    staticSummary: 'Aim the panel toward {direction} with a starting tilt near {tilt}°.',
-    staticReason: '{sunPath} This keeps a fixed panel aligned with the strongest part of the daily sun path.',
-    axisNote: 'If you enable tracking later, keep the rotation axis aligned north-south so the panel can follow the sun from east to west.',
-    trackingSummary: 'HelioSync will calculate the sun path for {label} and keep the panel aligned through single-axis tracking.',
-    trackingDetail: 'The system uses your location to estimate sunrise, sunset and the daily solar arc, then makes smooth alignment adjustments instead of relying on a fixed orientation alone.',
-    trackingAxisNote: 'Recommended axis alignment: north-south. This lets the panel follow the east-west solar path while keeping motion simple and stable.',
-  },
 };
 
-function getCopy(locale = 'en') {
-  return COPY[locale] || COPY.en;
+function getCopy(locale = 'es-MX') {
+  return COPY[locale] || COPY['es-MX'];
 }
 
 function interpolate(template, params) {
   return template.replace(/\{(\w+)\}/g, (_, key) => String(params[key] ?? ''));
 }
 
-export function buildLocationLabel(location = {}, locale = 'en') {
+export function buildLocationLabel(location = {}, locale = 'es-MX') {
   const copy = getCopy(locale);
   const pieces = [location.city, location.region, location.country].filter(Boolean);
 
@@ -54,7 +41,7 @@ export function buildLocationLabel(location = {}, locale = 'en') {
   return copy.yourSite;
 }
 
-export function getStaticOrientationRecommendation(location = {}, locale = 'en') {
+export function getStaticOrientationRecommendation(location = {}, locale = 'es-MX') {
   const copy = getCopy(locale);
   const latitude = Number(location.latitude);
   const hasLatitude = Number.isFinite(latitude);
@@ -77,7 +64,7 @@ export function getStaticOrientationRecommendation(location = {}, locale = 'en')
   };
 }
 
-export function getTrackingRecommendation(location = {}, locale = 'en') {
+export function getTrackingRecommendation(location = {}, locale = 'es-MX') {
   const copy = getCopy(locale);
   const label = buildLocationLabel(location, locale);
   const staticRecommendation = getStaticOrientationRecommendation(location, locale);

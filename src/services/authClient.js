@@ -14,6 +14,8 @@ import { auth, isFirebaseMockConfig } from './firebase';
 
 const MOCK_USERS_KEY = 'heliosync:mock-users';
 const MOCK_SESSION_KEY = 'heliosync:mock-session';
+const SESSION_LOGIN_AT_KEY = 'heliosync:login-at';
+const SESSION_MAX_MS = 90 * 24 * 60 * 60 * 1000; // 90 días
 const mockListeners = new Set();
 const googleProvider = new GoogleAuthProvider();
 
@@ -154,7 +156,26 @@ export function subscribeToSession(callback) {
         return;
       }
 
-      unsubscribe = onAuthStateChanged(auth, (user) => {
+      unsubscribe = onAuthStateChanged(auth, async (user) => {
+        if (!user) {
+          callback(null);
+          return;
+        }
+
+        // Verificar expiración de 3 meses
+        const storage = getLocalStorage();
+        const loginAt = Number(storage?.getItem(SESSION_LOGIN_AT_KEY) || 0);
+        if (loginAt > 0 && Date.now() - loginAt > SESSION_MAX_MS) {
+          storage?.removeItem(SESSION_LOGIN_AT_KEY);
+          await signOut(auth);
+          callback(null);
+          return;
+        }
+        // Registrar primera vez
+        if (!loginAt) {
+          storage?.setItem(SESSION_LOGIN_AT_KEY, String(Date.now()));
+        }
+
         callback(buildFirebaseUser(user));
       });
     })
@@ -284,6 +305,7 @@ export async function signOutUser() {
     return;
   }
 
+  getLocalStorage()?.removeItem(SESSION_LOGIN_AT_KEY);
   await signOut(auth);
 }
 

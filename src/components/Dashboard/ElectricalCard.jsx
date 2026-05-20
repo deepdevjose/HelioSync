@@ -18,9 +18,11 @@ export default function ElectricalCard() {
   const data = useHelioStore((state) => state.data);
   const history = useHelioStore((state) => state.history);
   const lastUpdatedAt = useHelioStore((state) => state.lastUpdatedAt);
+  const telemetrySource = useHelioStore((state) => state.telemetrySource);
   const userSetup = useHelioStore((state) => state.userSetup);
   const [now, setNow] = useState(() => Date.now());
-  const insights = getDashboardInsights(data, status, history, userSetup, locale, t);
+  const hasLiveTelemetry = telemetrySource === 'device';
+  const insights = getDashboardInsights(data, status, history, userSetup, locale, t, hasLiveTelemetry);
   const DirectionIcon = directionIcons[insights.outputState.symbol] || ArrowRight;
 
   useEffect(() => {
@@ -31,7 +33,9 @@ export default function ElectricalCard() {
     return () => window.clearInterval(intervalId);
   }, []);
 
-  const updatedLabel = formatRelativeUpdate(lastUpdatedAt, locale, t, now);
+  const updatedLabel = hasLiveTelemetry
+    ? formatRelativeUpdate(lastUpdatedAt, locale, t, now)
+    : t('dashboard.waitingForTelemetryShort');
 
   return (
     <GlassCard delay={0.15} className="flex h-full min-h-[300px] flex-col justify-between gap-5 overflow-hidden !p-5 sm:min-h-[340px] sm:gap-6 sm:!p-6 lg:!p-7">
@@ -60,9 +64,15 @@ export default function ElectricalCard() {
           <span className="text-[11px] font-medium uppercase tracking-[0.26em] text-slate-400">{t('dashboard.output')}</span>
           <div className="flex flex-wrap items-end gap-3">
             <span className="text-5xl font-light tracking-[-0.05em] text-white sm:text-6xl lg:text-7xl">
-              <CountUp end={data.electrical.power_w} decimals={1} duration={1.8} separator="," />
+              {hasLiveTelemetry ? (
+                <CountUp end={data.electrical.power_w} decimals={1} duration={1.8} separator="," />
+              ) : (
+                '—'
+              )}
             </span>
-            <span className="pb-2 text-xl font-semibold text-helium-400 sm:pb-3 sm:text-2xl">W</span>
+            {hasLiveTelemetry ? (
+              <span className="pb-2 text-xl font-semibold text-helium-400 sm:pb-3 sm:text-2xl">W</span>
+            ) : null}
           </div>
         </div>
 
